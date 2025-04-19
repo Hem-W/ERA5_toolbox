@@ -1,0 +1,18 @@
+# API keys file
+*.json
+
+# Log files
+era5_download_*.log
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Downloaded data files
+*.nc 
+*.grib
+
+# Test notebooks
+notebooks/test_*.ipynb
+notebooks/check_*.ipynb
