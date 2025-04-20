@@ -6,7 +6,7 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 
 1. Install the required dependencies:
    ```
-   pip install cdsapi
+   pip install cdsapi json5
    ```
 
 2. Configure your API keys:
@@ -21,8 +21,6 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
    }
    ```
    
-   **Important:** JSON doesn't support comments. Make sure your JSON file contains only valid JSON syntax without any comments.
-   
    You can obtain CDS API keys by registering at https://cds.climate.copernicus.eu/
 
 3. Make sure the `cdsapi_keys.json` file is in the same directory as the script, or specify a different location in the `load_api_keys()` function call.
@@ -32,24 +30,44 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 To download ERA5 data, simply run the script:
 
 ```
-python download_ERA5_multiAPI.py
+python -u downloader_ERA5.py
 ```
 
-By default, the script downloads the `100m_v_component_of_wind` variable for years 1940-2024. You can modify these parameters in the script.
+### Single-Level Data
+
+To download single-level ERA5 data, modify the main section:
+
+```python
+if __name__ == '__main__':
+    years = range(1940, 2025)
+    var = "toa_incident_solar_radiation"  # or any other single-level variable
+    dataset = "reanalysis-era5-single-levels"
+    pressure_level = None
+    # ...
+```
+
+### Pressure-Level Data
+
+To download pressure-level ERA5 data, configure the parameters like this:
+
+```python
+if __name__ == '__main__':
+    years = range(1940, 2025)
+    var = "geopotential"  # or any other pressure-level variable
+    dataset = "reanalysis-era5-pressure-levels"
+    pressure_level = "500"  # Pressure level in hPa
+    # ...
+```
 
 ## Features
 
-- Uses multiple API keys in parallel to speed up downloads
-- Distributes download tasks efficiently across keys
-- Skips already downloaded files
-- Implements proper error handling and logging
+- Distributes download tasks efficiently across multiple API keys in parallel to speed up downloads
 - Each API key runs two concurrent downloads for optimal performance
+- Skips already downloaded files
+- Supports both ERA5 single-level and pressure-level datasets
 
 ## Security
 
 The script loads API keys from a separate JSON file, which:
 - Keeps sensitive credentials out of source code
 - Makes it easier to maintain and update keys
-- Prevents accidental exposure of keys in version control systems
-
-Do not commit your `cdsapi_keys.json` file containing real API keys to version control. Add it to your `.gitignore` file. 

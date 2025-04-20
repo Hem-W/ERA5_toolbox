@@ -15,7 +15,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.0.1"
+__version__ = "0.0.2.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -39,7 +39,8 @@ VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp",
           "surface_solar_radiation_downwards": "ssrd",
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
-          "mean_sea_level_pressure": "msl"}
+          "mean_sea_level_pressure": "msl",
+          "geopotential": "z"}
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
@@ -125,7 +126,7 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
         logger.error(f"Error downloading with urllib3: {str(e)}")
         return False
 
-def download_ERA5(year, variable, dataset="reanalysis-era5-single-levels", skip_existing=True, api_key=None):
+def download_ERA5(year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, api_key=None):
     request = {
         'product_type': ['reanalysis'],
         'variable': [variable],
@@ -136,7 +137,16 @@ def download_ERA5(year, variable, dataset="reanalysis-era5-single-levels", skip_
         "data_format": "netcdf",
         "download_format": "unarchived"
     }
-    target = f"era5.reanalysis.{VB_MAP.get(variable) or variable}.1hr.0p25deg.global.{year}.nc"
+    
+    # Add pressure level for pressure-levels dataset
+    if dataset == "reanalysis-era5-pressure-levels":
+        if pressure_level is None:
+            raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
+        request["pressure_level"] = [pressure_level]
+        target = f"era5.reanalysis.{VB_MAP.get(variable) or variable}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+    else:
+        target = f"era5.reanalysis.{VB_MAP.get(variable) or variable}.1hr.0p25deg.global.{year}.nc"
+    
     if skip_existing and pathlib.Path(target).exists():
         logger.info(f"Skip existing file {target}")
         return
@@ -236,9 +246,11 @@ key: {api_key}
             pass  # Ignore errors during cleanup
 
 def process_year(args):
-    year, variable, key = args
+    year, variable, key = args[0], args[1], args[2]
+    dataset = args[3] if len(args) > 3 else "reanalysis-era5-single-levels"
+    pressure_level = args[4] if len(args) > 4 else None
     try:
-        download_ERA5(year, variable, api_key=key)
+        download_ERA5(year, variable, dataset=dataset, pressure_level=pressure_level, api_key=key)
     except Exception as e:
         key_display = key[:8] + '...' if key else 'default'
         logger.error(f"Error downloading {year} with key {key_display}: {str(e)}")
@@ -355,7 +367,9 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
 
 if __name__ == '__main__':
     years = range(1940, 2025)
-    var = "toa_incident_solar_radiation"
+    var = "geopotential"
+    dataset = "reanalysis-era5-pressure-levels"
+    pressure_level = "500"
     
     # Load API keys from JSON file
     cdsapi_keys = load_api_keys()
@@ -368,6 +382,9 @@ if __name__ == '__main__':
     logger.info("=== ERA5 Download Configuration ===")
     logger.info(f"Years: {years.start} to {years.stop-1}")
     logger.info(f"Variable: {var}")
+    logger.info(f"Dataset: {dataset}")
+    if pressure_level:
+        logger.info(f"Pressure Level: {pressure_level} hPa")
     logger.info(f"API Keys loaded: {len(cdsapi_keys)}")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
     logger.info(f"Number of processes: {num_processes}")
@@ -380,12 +397,12 @@ if __name__ == '__main__':
     for i, year in enumerate(years):
         key_index = i % len(cdsapi_keys)
         key = cdsapi_keys[key_index]
-        args_list.append((year, var, key))
+        args_list.append((year, var, key, dataset, pressure_level))
     
     # Group tasks by key
     key_grouped_tasks = {}
     for arg in args_list:
-        year, var, key = arg
+        year, var, key = arg[0], arg[1], arg[2]
         if key not in key_grouped_tasks:
             key_grouped_tasks[key] = []
         key_grouped_tasks[key].append(arg)
