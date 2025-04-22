@@ -2,7 +2,7 @@
 import traceback
 import pathlib
 import cdsapi
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager
 import os
 import tempfile
 import time
@@ -15,7 +15,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.0.2.dev"
+__version__ = "0.0.3.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -245,10 +245,10 @@ key: {api_key}
         except:
             pass  # Ignore errors during cleanup
 
-def process_year(args):
-    year, variable, key = args[0], args[1], args[2]
-    dataset = args[3] if len(args) > 3 else "reanalysis-era5-single-levels"
-    pressure_level = args[4] if len(args) > 4 else None
+def process_year(task):
+    year, variable, key = task[0], task[1], task[2]
+    dataset = task[3] if len(task) > 3 else "reanalysis-era5-single-levels"
+    pressure_level = task[4] if len(task) > 4 else None
     try:
         download_ERA5(year, variable, dataset=dataset, pressure_level=pressure_level, api_key=key)
     except Exception as e:
@@ -256,62 +256,66 @@ def process_year(args):
         logger.error(f"Error downloading {year} with key {key_display}: {str(e)}")
         logger.error(traceback.format_exc())
 
-def worker_thread(task_queue):
-    """Worker thread that processes years from a queue"""
+def worker_thread(task_queue, worker_id, key):
+    """Worker thread that processes tasks from a shared queue"""
+    key_display = key[:8] + '...' if key else 'default'
+    logger.info(f"Worker {worker_id} with key {key_display} started")
+    
     while True:
         try:
-            task = task_queue.get(block=False)
-            if task is None:  # Sentinel to stop the thread
+            task = task_queue.get(timeout=10)  # Get a task with timeout
+            if task is None:  # Sentinel value to stop
+                logger.info(f"Worker {worker_id} with key {key_display} received stop signal")
                 task_queue.task_done()
                 break
                 
+            year = task[0] if isinstance(task, tuple) else task
+            logger.info(f"Worker {worker_id} with key {key_display} processing year {year}")
+            
+            # Add the key to the task
+            full_task = list(task)
+            full_task[2] = key  # Set the API key
+            
             try:
-                process_year(task)
+                process_year(full_task)
+            except Exception as e:
+                logger.error(f"Worker {worker_id} with key {key_display} error processing year {year}: {str(e)}")
             finally:
                 task_queue.task_done()
+                logger.info(f"Worker {worker_id} with key {key_display} completed year {year}")
                 
         except queue.Empty:
-            break
+            # If queue is empty for a while, check if we should exit
+            if task_queue.empty():
+                logger.info(f"Worker {worker_id} with key {key_display} found empty queue, exiting")
+                break
+            # Otherwise continue waiting for new tasks
+            continue
+        except Exception as e:
+            logger.error(f"Worker {worker_id} with key {key_display} encountered error: {str(e)}")
+            # Continue processing other tasks
 
-def process_with_concurrent_workers(key_years_tuple):
-    """Process years for a key using two concurrent worker threads
-    
-    This ensures that each key has two active submissions at all times,
-    maximizing throughput by allowing one request to be processed while
-    another is being downloaded.
-    """
-    key, years_data = key_years_tuple
+def key_processor(key, shared_task_queue):
+    """Process that manages two worker threads for a single API key"""
     key_display = key[:8] + '...' if key else 'default'
-    logger.info(f"Starting worker process for key {key_display} with {len(years_data)} tasks")
+    logger.info(f"Starting key processor for {key_display}")
     
-    # Create two queues
-    task_queue1 = queue.Queue()
-    task_queue2 = queue.Queue()
-    
-    # Split tasks between queues (evenly distribute)
-    for i, task in enumerate(years_data):
-        if i % 2 == 0:
-            task_queue1.put(task)
-        else:
-            task_queue2.put(task)
-    
-    # Create and start two worker threads
+    # Create two worker threads for this key
     threads = []
-    if not task_queue1.empty():
-        t1 = threading.Thread(target=worker_thread, args=(task_queue1,))
-        t1.start()
-        threads.append(t1)
-    
-    if not task_queue2.empty():
-        t2 = threading.Thread(target=worker_thread, args=(task_queue2,))
-        t2.start()
-        threads.append(t2)
+    for i in range(2):  # Two concurrent workers per key
+        t = threading.Thread(
+            target=worker_thread, 
+            args=(shared_task_queue, i+1, key)
+        )
+        t.daemon = True
+        t.start()
+        threads.append(t)
     
     # Wait for all threads to complete
     for t in threads:
         t.join()
     
-    logger.info(f"Completed all tasks for key {key_display}")
+    logger.info(f"Key processor for {key_display} completed all tasks")
 
 def load_api_keys(keys_file='cdsapi_keys.json'):
     """Load API keys from a JSON file using JSON5 parser (supports comments)
@@ -392,30 +396,27 @@ if __name__ == '__main__':
     
     logger.info("Starting ERA5 download process")
     
-    # Distribute years across keys
-    args_list = []
-    for i, year in enumerate(years):
-        key_index = i % len(cdsapi_keys)
-        key = cdsapi_keys[key_index]
-        args_list.append((year, var, key, dataset, pressure_level))
+    # Create a Manager for sharing resources across processes
+    with Manager() as manager:
+        # Create a shared task queue
+        shared_task_queue = manager.Queue()
+        
+        # Fill the queue with all year tasks (without keys)
+        for year in years:
+            # Create task without key - key will be added by the worker
+            shared_task_queue.put((year, var, None, dataset, pressure_level))
+        
+        logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
+        
+        # Create processes for each key
+        processes = []
+        for key in cdsapi_keys:
+            p = threading.Thread(target=key_processor, args=(key, shared_task_queue))
+            processes.append(p)
+            p.start()
+        
+        # Wait for all processes to complete
+        for p in processes:
+            p.join()
     
-    # Group tasks by key
-    key_grouped_tasks = {}
-    for arg in args_list:
-        year, var, key = arg[0], arg[1], arg[2]
-        if key not in key_grouped_tasks:
-            key_grouped_tasks[key] = []
-        key_grouped_tasks[key].append(arg)
-    
-    # Create a list of (key, years_data) tuples for multiprocessing
-    key_tasks = [(key, years_data) for key, years_data in key_grouped_tasks.items()]
-    
-    # Run downloads in parallel - one process per key
-    # Each process will launch two threads to handle concurrent downloads
-    logger.info("Starting download pool")
-    start_time = time.time()
-    with Pool(processes=num_processes) as pool:
-        pool.map(process_with_concurrent_workers, key_tasks)
-    
-    elapsed_time = time.time() - start_time
-    logger.info(f"Download process completed in {elapsed_time:.2f} seconds")
+    logger.info("All download processes completed")
