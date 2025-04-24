@@ -4,7 +4,6 @@ import pathlib
 import cdsapi
 from multiprocessing import Pool, Manager
 import os
-import tempfile
 import time
 import threading
 import queue
@@ -15,7 +14,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.0.3.dev"
+__version__ = "0.1.0"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -40,7 +39,7 @@ VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp",
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
           "mean_sea_level_pressure": "msl",
-          "geopotential": "z"}
+          "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v"}
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
@@ -126,7 +125,20 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
         logger.error(f"Error downloading with urllib3: {str(e)}")
         return False
 
-def download_ERA5(year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, api_key=None):
+def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True):
+    """
+    Download ERA5 data using an existing CDS client
+    
+    This function reuses an existing CDS client to avoid creating a new client for each download
+    
+    Args:
+        client: Existing CDS client
+        year: Year to download
+        variable: Variable to download
+        dataset: Dataset name
+        pressure_level: Pressure level (for pressure level dataset)
+        skip_existing: Whether to skip if file exists
+    """
     request = {
         'product_type': ['reanalysis'],
         'variable': [variable],
@@ -151,36 +163,17 @@ def download_ERA5(year, variable, dataset="reanalysis-era5-single-levels", press
         logger.info(f"Skip existing file {target}")
         return
     
-    # Display only a portion of the key for security in logs
-    key_display = api_key[:8] + '...' if api_key else "default"
-    logger.info(f"Requesting {target} with key {key_display}")
+    logger.info(f"Requesting {target}")
     
-    # Create a temporary .cdsapirc file with our credentials
-    # Using the correct format: "url: URL" and "key: KEY"
-    rc_content = f"""url: https://cds.climate.copernicus.eu/api
-key: {api_key}
-"""
-    
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.cdsapirc', delete=False) as tmp:
-        tmp.write(rc_content)
-        tmp_path = tmp.name
-        
     try:
-        # Set the environment variable to point to our temporary config
-        old_env = os.environ.get('CDSAPI_RC')
-        os.environ['CDSAPI_RC'] = tmp_path
-        
-        # Now create the client which will use our temporary config
-        client = cdsapi.Client()
+        # Retrieve the data
         result = client.retrieve(dataset, request)
 
         # Store the URL for potential fallback use
         download_url = None
         try:
             download_url = result.location
-            # logger.info(f"Got direct download URL: {download_url}")
         except (AttributeError, Exception):
-            # If we can't get the URL, continue with regular download
             logger.warning(f"Could not get direct download URL, only use standard download")
         
         try:
@@ -224,7 +217,7 @@ key: {api_key}
                     logger.error("No direct download URL available for fallback")
                 
                 # If we reach here, the download failed
-                if os.path.exists(target): # and os.path.getsize(target) < 10*1024*1024:
+                if os.path.exists(target):
                     try:
                         os.remove(target)
                         logger.info(f"Deleted small/broken file {target} due to failed downloads")
@@ -234,88 +227,73 @@ key: {api_key}
             # Re-raise the original exception
             raise
             
-    finally:
-        # Clean up
-        if old_env:
-            os.environ['CDSAPI_RC'] = old_env
-        else:
-            os.environ.pop('CDSAPI_RC', None)
-        try:
-            os.unlink(tmp_path)
-        except:
-            pass  # Ignore errors during cleanup
-
-def process_year(task):
-    year, variable, key = task[0], task[1], task[2]
-    dataset = task[3] if len(task) > 3 else "reanalysis-era5-single-levels"
-    pressure_level = task[4] if len(task) > 4 else None
-    try:
-        download_ERA5(year, variable, dataset=dataset, pressure_level=pressure_level, api_key=key)
     except Exception as e:
-        key_display = key[:8] + '...' if key else 'default'
-        logger.error(f"Error downloading {year} with key {key_display}: {str(e)}")
+        logger.error(f"Error downloading {year}: {str(e)}")
         logger.error(traceback.format_exc())
+        raise
 
-def worker_thread(task_queue, worker_id, key):
-    """Worker thread that processes tasks from a shared queue"""
+def key_worker(key, task_queue):
+    """Worker that processes multiple tasks with a single environment setup"""
     key_display = key[:8] + '...' if key else 'default'
-    logger.info(f"Worker {worker_id} with key {key_display} started")
+    logger.info(f"Worker for key {key_display} started")
     
-    while True:
-        try:
-            task = task_queue.get(timeout=10)  # Get a task with timeout
-            if task is None:  # Sentinel value to stop
-                logger.info(f"Worker {worker_id} with key {key_display} received stop signal")
-                task_queue.task_done()
-                break
-                
-            year = task[0] if isinstance(task, tuple) else task
-            logger.info(f"Worker {worker_id} with key {key_display} processing year {year}")
-            
-            # Add the key to the task
-            full_task = list(task)
-            full_task[2] = key  # Set the API key
-            
+    try:
+        # Create client directly with API key instead of using environment variables
+        client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
+        
+        # Process tasks from queue
+        while True:
             try:
-                process_year(full_task)
-            except Exception as e:
-                logger.error(f"Worker {worker_id} with key {key_display} error processing year {year}: {str(e)}")
-            finally:
-                task_queue.task_done()
-                logger.info(f"Worker {worker_id} with key {key_display} completed year {year}")
+                task = task_queue.get(timeout=10)
+                if task is None:  # Stop signal
+                    logger.info(f"Worker for key {key_display} received stop signal")
+                    task_queue.task_done()
+                    break
+                    
+                # Process task with existing client
+                year, variable = task[0], task[1]
+                dataset = task[3] if len(task) > 3 else "reanalysis-era5-single-levels"
+                pressure_level = task[4] if len(task) > 4 else None
                 
-        except queue.Empty:
-            # If queue is empty for a while, check if we should exit
-            if task_queue.empty():
-                logger.info(f"Worker {worker_id} with key {key_display} found empty queue, exiting")
-                break
-            # Otherwise continue waiting for new tasks
-            continue
-        except Exception as e:
-            logger.error(f"Worker {worker_id} with key {key_display} encountered error: {str(e)}")
-            # Continue processing other tasks
+                logger.info(f"Worker for key {key_display} processing year {year}")
+                
+                try:
+                    # Process download without creating new environment each time
+                    download_with_client(client, year, variable, dataset, pressure_level)
+                    logger.info(f"Worker for key {key_display} completed year {year}")
+                except Exception as e:
+                    logger.error(f"Worker for key {key_display} error processing year {year}: {str(e)}")
+                
+                task_queue.task_done()
+                
+            except queue.Empty:
+                # If queue is empty for a while, check if we should exit
+                if task_queue.empty():
+                    logger.info(f"Worker for key {key_display} found empty queue, exiting")
+                    break
+                # Otherwise continue waiting for new tasks
+                continue
+            except Exception as e:
+                logger.error(f"Worker for key {key_display} encountered error: {str(e)}")
+                # Continue processing other tasks
+    finally:
+        logger.info(f"Worker for key {key_display} finished and cleaned up")
 
-def key_processor(key, shared_task_queue):
-    """Process that manages two worker threads for a single API key"""
-    key_display = key[:8] + '...' if key else 'default'
-    logger.info(f"Starting key processor for {key_display}")
+def start_key_workers(key, shared_task_queue, num_workers=2):
+    """Start multiple worker threads for a single API key"""
+    # key_display = key[:8] + '...' if key else 'default'
+    # logger.info(f"Starting {num_workers} workers for key {key_display}")
     
-    # Create two worker threads for this key
+    # Create multiple worker threads for this key
     threads = []
-    for i in range(2):  # Two concurrent workers per key
-        t = threading.Thread(
-            target=worker_thread, 
-            args=(shared_task_queue, i+1, key)
-        )
+    for i in range(num_workers):
+        t = threading.Thread(target=key_worker, args=(key, shared_task_queue))
         t.daemon = True
         t.start()
         threads.append(t)
     
-    # Wait for all threads to complete
-    for t in threads:
-        t.join()
-    
-    logger.info(f"Key processor for {key_display} completed all tasks")
+    # Return the threads so we can join them later
+    return threads
 
 def load_api_keys(keys_file='cdsapi_keys.json'):
     """Load API keys from a JSON file using JSON5 parser (supports comments)
@@ -371,15 +349,15 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
 
 if __name__ == '__main__':
     years = range(1940, 2025)
-    var = "geopotential"
+    var = "u_component_of_wind"
     dataset = "reanalysis-era5-pressure-levels"
     pressure_level = "500"
     
     # Load API keys from JSON file
     cdsapi_keys = load_api_keys()
 
-    # Number of concurrent processes - one process per key
-    num_processes = len(cdsapi_keys)
+    # Number of workers per key
+    workers_per_key = 2
     
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
@@ -389,12 +367,14 @@ if __name__ == '__main__':
     logger.info(f"Dataset: {dataset}")
     if pressure_level:
         logger.info(f"Pressure Level: {pressure_level} hPa")
-    logger.info(f"API Keys loaded: {len(cdsapi_keys)}")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
-    logger.info(f"Number of processes: {num_processes}")
+    logger.info(f"Workers per key: {workers_per_key}")
     logger.info("=================================")
     
-    logger.info("Starting ERA5 download process")
+    logger.info("Starting ERA5 download process with dynamic task assignment")
+    
+    # Track start time
+    start_time = time.time()
     
     # Create a Manager for sharing resources across processes
     with Manager() as manager:
@@ -408,15 +388,16 @@ if __name__ == '__main__':
         
         logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
         
-        # Create processes for each key
-        processes = []
+        # Start workers for each key
+        all_threads = []
         for key in cdsapi_keys:
-            p = threading.Thread(target=key_processor, args=(key, shared_task_queue))
-            processes.append(p)
-            p.start()
+            key_threads = start_key_workers(key, shared_task_queue, workers_per_key)
+            all_threads.extend(key_threads)
         
-        # Wait for all processes to complete
-        for p in processes:
-            p.join()
+        # Wait for all threads to complete
+        for t in all_threads:
+            t.join()
     
-    logger.info("All download processes completed")
+    # Calculate elapsed time
+    elapsed_time = time.time() - start_time
+    logger.info(f"All download processes completed in {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}")

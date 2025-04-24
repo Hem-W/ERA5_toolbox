@@ -1,6 +1,15 @@
 # Changelog
 
-## [0.0.2.dev] - In Development
+## [0.1.0] - 20250422
+### Added
+- Dynamic task assignment that efficiently distributes tasks across API keys
+- Enhanced logging with detailed worker status information
+
+### Changed
+- Reused CDS client for each worker to reduce overhead
+- Direct input of API keys to workers instead of using .cdsapirc configuration
+
+## [0.0.2.dev] - 20250421
 ### Added
 - Support for ERA5 pressure levels dataset
 - Added pressure_level parameter for specifying atmospheric levels

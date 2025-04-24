@@ -6,7 +6,7 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 
 1. Install the required dependencies:
    ```
-   pip install cdsapi json5
+   pip install cdsapi json5 tqdm
    ```
 
 2. Configure your API keys:
@@ -61,10 +61,14 @@ if __name__ == '__main__':
 
 ## Features
 
-- Distributes download tasks efficiently across multiple API keys in parallel to speed up downloads
-- Each API key runs two concurrent downloads for optimal performance
+- Dynamic task assignment system that automatically balances workload between API keys
+  - Faster keys will process more tasks, maximizing overall throughput
+- Each API key maintains two concurrent downloads for optimal performance
+- Reuses CDS client for each worker, reducing overhead and improving efficiency
 - Skips already downloaded files
 - Supports both ERA5 single-level and pressure-level datasets
+- Resilient downloading with automatic retries and resuming of partial downloads
+- Enhanced progress tracking with detailed logging
 
 ## Security
 
