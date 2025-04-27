@@ -14,7 +14,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.0"
+__version__ = "0.1.1.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -78,7 +78,7 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
             file_size = os.path.getsize(target_path)
             headers['Range'] = f'bytes={file_size}-'
             mode = 'ab'
-            logger.info(f"Resuming download from byte {file_size}")
+            logger.info(f"urllib3: Resuming download from byte {file_size}")
         
         # Get content length with a HEAD request
         head_response = http.request('HEAD', url, headers=headers)
@@ -115,17 +115,17 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
         
         # Verify if download is complete
         if total_size > 0 and progress < total_size:
-            logger.warning(f"Download incomplete: got {progress} bytes out of {total_size}")
+            logger.warning(f"urllib3: Download incomplete for {target_path}: got {progress} bytes out of {total_size}")
             return False
             
-        logger.info(f"Successfully downloaded {target_path}")
+        logger.info(f"urllib3: Successfully downloaded {target_path}")
         return True
         
     except Exception as e:
-        logger.error(f"Error downloading with urllib3: {str(e)}")
+        logger.error(f"urllib3: Error downloading {target_path}: {str(e)}")
         return False
 
-def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True):
+def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None):
     """
     Download ERA5 data using an existing CDS client
     
@@ -138,7 +138,11 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         dataset: Dataset name
         pressure_level: Pressure level (for pressure level dataset)
         skip_existing: Whether to skip if file exists
+        worker_id: Optional identifier for the worker running this download
     """
+    # Create context prefix for logs if worker_id is provided
+    log_prefix = f"[Worker {worker_id}]: " if worker_id else ""
+    
     request = {
         'product_type': ['reanalysis'],
         'variable': [variable],
@@ -160,10 +164,10 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         target = f"era5.reanalysis.{VB_MAP.get(variable) or variable}.1hr.0p25deg.global.{year}.nc"
     
     if skip_existing and pathlib.Path(target).exists():
-        logger.info(f"Skip existing file {target}")
+        logger.info(f"{log_prefix}Skip existing file {target}")
         return
     
-    logger.info(f"Requesting {target}")
+    logger.info(f"{log_prefix}Requesting {target}")
     
     try:
         # Retrieve the data
@@ -174,15 +178,16 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         try:
             download_url = result.location
         except (AttributeError, Exception):
-            logger.warning(f"Could not get direct download URL, only use standard download")
+            logger.warning(f"{log_prefix}Could not get direct download URL, only use standard download")
         
         try:
             # Use the regular download method (original behavior)
             result.download(target)
-            logger.info(f"Successfully downloaded {target} via cdsapi")
+            logger.info(f"{log_prefix}Successfully downloaded {target} via cdsapi")
             return
         except Exception as e:
-            logger.error(f"Standard download failed: {str(e)}")
+            # Use fallback download if the standard download fails
+            logger.error(f"{log_prefix}Standard download failed for {target}: {str(e)}")
             
             # Check if the error is network-related
             if ("urllib3.exceptions.ProtocolError" in str(e) or 
@@ -193,49 +198,50 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
                 
                 # Try direct download if we have the URL
                 if download_url:
-                    logger.info(f"Attempting fallback download with urllib3: {download_url}")
+                    logger.info(f"{log_prefix}Attempting download with urllib3 for {target}: {download_url}")
                     
                     # Try up to 3 times with urllib3
                     for attempt in range(1, 4):
                         if attempt > 1:
-                            logger.info(f"Retry attempt {attempt}/3 for {target}")
+                            logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
                         
                         success = download_file_with_urllib3(download_url, target)
                         
                         if success:
-                            logger.info(f"Successfully downloaded {target} using urllib3 as fallback")
+                            logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
                             return  # Exit function successfully
                         
                         # Wait before retry (exponential backoff)
                         if attempt < 3:
                             wait_time = 60 * (2 ** (attempt - 1))
-                            logger.info(f"Waiting {wait_time} seconds before next attempt")
+                            logger.info(f"{log_prefix}Waiting {wait_time} seconds before next attempt for {target} using urllib3")
                             time.sleep(wait_time)
                     
-                    logger.error(f"All download attempts failed for {target}")
+                    logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
                 else:
-                    logger.error("No direct download URL available for fallback")
-                
-                # If we reach here, the download failed
-                if os.path.exists(target):
-                    try:
-                        os.remove(target)
-                        logger.info(f"Deleted small/broken file {target} due to failed downloads")
-                    except Exception as del_err:
-                        logger.error(f"Failed to delete broken file {target}: {str(del_err)}")
+                    logger.error(f"{log_prefix}No direct download URL available for fallback")
+            
+            # Cleanup partial/broken file for ANY failure case
+            if os.path.exists(target):
+                try:
+                    os.remove(target)
+                    logger.info(f"{log_prefix}Deleted partial/broken file {target} due to failed download")
+                except Exception as del_err:
+                    logger.error(f"{log_prefix}Failed to delete broken file {target}: {str(del_err)}")
             
             # Re-raise the original exception
             raise
             
     except Exception as e:
-        logger.error(f"Error downloading {year}: {str(e)}")
+        logger.error(f"{log_prefix}Error downloading {year}: {str(e)}")
         logger.error(traceback.format_exc())
         raise
 
-def key_worker(key, task_queue):
+def key_worker(key, task_queue, worker_index=""):
     """Worker that processes multiple tasks with a single environment setup"""
-    key_display = key[:8] + '...' if key else 'default'
-    logger.info(f"Worker for key {key_display} started")
+    key_prefix = key[:8] if key else 'default'
+    worker_id = f"{key_prefix}_{worker_index}"  # Create unique worker ID with key prefix and index
+    logger.info(f"Worker {worker_id} started")
     
     try:
         # Create client directly with API key instead of using environment variables
@@ -246,7 +252,7 @@ def key_worker(key, task_queue):
             try:
                 task = task_queue.get(timeout=10)
                 if task is None:  # Stop signal
-                    logger.info(f"Worker for key {key_display} received stop signal")
+                    logger.info(f"Worker {worker_id} received stop signal")
                     task_queue.task_done()
                     break
                     
@@ -255,29 +261,32 @@ def key_worker(key, task_queue):
                 dataset = task[3] if len(task) > 3 else "reanalysis-era5-single-levels"
                 pressure_level = task[4] if len(task) > 4 else None
                 
-                logger.info(f"Worker for key {key_display} processing year {year}")
+                logger.info(f"Worker {worker_id} processing year {year}")
                 
                 try:
                     # Process download without creating new environment each time
-                    download_with_client(client, year, variable, dataset, pressure_level)
-                    logger.info(f"Worker for key {key_display} completed year {year}")
+                    # Pass worker_id to download function for consistent logging
+                    download_with_client(client, year, variable, dataset, pressure_level, 
+                                         worker_id=worker_id)
+                    # Skip redundant log since download_with_client already logs completion
                 except Exception as e:
-                    logger.error(f"Worker for key {key_display} error processing year {year}: {str(e)}")
+                    # Skip redundant error logging since download_with_client already logs errors
+                    pass
                 
                 task_queue.task_done()
                 
             except queue.Empty:
                 # If queue is empty for a while, check if we should exit
                 if task_queue.empty():
-                    logger.info(f"Worker for key {key_display} found empty queue, exiting")
+                    logger.info(f"Worker {worker_id} found empty queue, exiting")
                     break
                 # Otherwise continue waiting for new tasks
                 continue
             except Exception as e:
-                logger.error(f"Worker for key {key_display} encountered error: {str(e)}")
+                logger.error(f"Worker {worker_id} encountered error: {str(e)}")
                 # Continue processing other tasks
     finally:
-        logger.info(f"Worker for key {key_display} finished and cleaned up")
+        logger.info(f"Worker {worker_id} finished and cleaned up")
 
 def start_key_workers(key, shared_task_queue, num_workers=2):
     """Start multiple worker threads for a single API key"""
@@ -287,7 +296,8 @@ def start_key_workers(key, shared_task_queue, num_workers=2):
     # Create multiple worker threads for this key
     threads = []
     for i in range(num_workers):
-        t = threading.Thread(target=key_worker, args=(key, shared_task_queue))
+        # Pass worker index to distinguish between workers with the same key
+        t = threading.Thread(target=key_worker, args=(key, shared_task_queue, i))
         t.daemon = True
         t.start()
         threads.append(t)
