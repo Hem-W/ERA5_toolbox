@@ -14,7 +14,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.1.dev"
+__version__ = "0.1.2.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -181,56 +181,39 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
             logger.warning(f"{log_prefix}Could not get direct download URL, only use standard download")
         
         try:
-            # Use the regular download method (original behavior)
+            # Use regular download method (original behavior)
             result.download(target)
             logger.info(f"{log_prefix}Successfully downloaded {target} via cdsapi")
             return
         except Exception as e:
-            # Use fallback download if the standard download fails
-            logger.error(f"{log_prefix}Standard download failed for {target}: {str(e)}")
+            # Log error when standard download fails
+            logger.error(f"{log_prefix}Download failed for {target}: {str(e)}")
+            logger.error(traceback.format_exc())
             
-            # Check if the error is network-related
-            if ("urllib3.exceptions.ProtocolError" in str(e) or 
-                "IncompleteRead" in str(e) or 
-                "ChunkedEncodingError" in str(e) or
-                "ConnectionError" in str(e) or
-                "timeout" in str(e).lower()):
+            # Try direct download if we have the URL (for ANY error)
+            if download_url:
+                logger.info(f"{log_prefix}Attempting download with urllib3 for {target}: {download_url}")
                 
-                # Try direct download if we have the URL
-                if download_url:
-                    logger.info(f"{log_prefix}Attempting download with urllib3 for {target}: {download_url}")
+                # Try up to 3 times with urllib3
+                for attempt in range(1, 4):
+                    if attempt > 1:
+                        logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
                     
-                    # Try up to 3 times with urllib3
-                    for attempt in range(1, 4):
-                        if attempt > 1:
-                            logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
-                        
-                        success = download_file_with_urllib3(download_url, target)
-                        
-                        if success:
-                            logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
-                            return  # Exit function successfully
-                        
-                        # Wait before retry (exponential backoff)
-                        if attempt < 3:
-                            wait_time = 60 * (2 ** (attempt - 1))
-                            logger.info(f"{log_prefix}Waiting {wait_time} seconds before next attempt for {target} using urllib3")
-                            time.sleep(wait_time)
+                    success = download_file_with_urllib3(download_url, target)
                     
-                    logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
-                else:
-                    logger.error(f"{log_prefix}No direct download URL available for fallback")
-            
-            # Cleanup partial/broken file for ANY failure case
-            if os.path.exists(target):
-                try:
-                    os.remove(target)
-                    logger.info(f"{log_prefix}Deleted partial/broken file {target} due to failed download")
-                except Exception as del_err:
-                    logger.error(f"{log_prefix}Failed to delete broken file {target}: {str(del_err)}")
-            
-            # Re-raise the original exception
-            raise
+                    if success:
+                        logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
+                        return  # Exit function successfully
+                    
+                    # Wait before retry (exponential backoff)
+                    if attempt < 3:
+                        wait_time = 60 * (2 ** (attempt - 1))
+                        logger.info(f"{log_prefix}Waiting {wait_time} seconds before next attempt for {target} using urllib3")
+                        time.sleep(wait_time)
+                
+                logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
+            else:
+                logger.error(f"{log_prefix}No direct download URL available for fallback")
             
     except Exception as e:
         logger.error(f"{log_prefix}Error downloading {year}: {str(e)}")
