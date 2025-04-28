@@ -14,7 +14,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.3.dev"
+__version__ = "0.1.3"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")

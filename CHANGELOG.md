@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.1.3] - 20250428
+### Added
+- Enhanced error logging and simplified worker format in logging
+
+## [0.1.2.dev] - 20250425
+### Added
+- JSON5 support for API keys configuration allowing comments in JSON
+- Improved handling of incomplete downloads when error occurs
+
+## [0.1.1.dev] - 20250424
+### Changed
+- More precise logging when falling back to urllib3
+- Improved retry logic with exponential backoff
+
 ## [0.1.0] - 20250422
 ### Added
 - Dynamic task assignment that efficiently distributes tasks across API keys
