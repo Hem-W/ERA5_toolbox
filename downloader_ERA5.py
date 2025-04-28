@@ -14,7 +14,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.2.dev"
+__version__ = "0.1.3.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -141,7 +141,7 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         worker_id: Optional identifier for the worker running this download
     """
     # Create context prefix for logs if worker_id is provided
-    log_prefix = f"[Worker {worker_id}]: " if worker_id else ""
+    log_prefix = f"Worker {worker_id}: " if worker_id else ""
     
     request = {
         'product_type': ['reanalysis'],
@@ -222,7 +222,7 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
 
 def key_worker(key, task_queue, worker_index=""):
     """Worker that processes multiple tasks with a single environment setup"""
-    key_prefix = key[:8] if key else 'default'
+    key_prefix = key[:4] if key else 'default'
     worker_id = f"{key_prefix}_{worker_index}"  # Create unique worker ID with key prefix and index
     logger.info(f"Worker {worker_id} started")
     
@@ -244,14 +244,12 @@ def key_worker(key, task_queue, worker_index=""):
                 dataset = task[3] if len(task) > 3 else "reanalysis-era5-single-levels"
                 pressure_level = task[4] if len(task) > 4 else None
                 
-                logger.info(f"Worker {worker_id} processing year {year}")
+                # logger.info(f"Worker {worker_id} processing year {year}")
                 
                 try:
-                    # Process download without creating new environment each time
-                    # Pass worker_id to download function for consistent logging
+                    # Process download with existing client
                     download_with_client(client, year, variable, dataset, pressure_level, 
                                          worker_id=worker_id)
-                    # Skip redundant log since download_with_client already logs completion
                 except Exception as e:
                     # Skip redundant error logging since download_with_client already logs errors
                     pass
@@ -273,9 +271,6 @@ def key_worker(key, task_queue, worker_index=""):
 
 def start_key_workers(key, shared_task_queue, num_workers=2):
     """Start multiple worker threads for a single API key"""
-    # key_display = key[:8] + '...' if key else 'default'
-    # logger.info(f"Starting {num_workers} workers for key {key_display}")
-    
     # Create multiple worker threads for this key
     threads = []
     for i in range(num_workers):
