@@ -1,8 +1,9 @@
 # Download ERA5 data from CDS API
 import traceback
 import pathlib
+from itertools import product
 import cdsapi
-from multiprocessing import Pool, Manager
+from multiprocessing import Manager
 import os
 import time
 import threading
@@ -14,7 +15,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.3"
+__version__ = "0.1.4.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -35,7 +36,7 @@ logger.info(f"ERA5 Downloader Version: {__version__}")
 VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", 
           "10m_u_component_of_wind": "u10", "10m_v_component_of_wind": "v10", 
           "100m_u_component_of_wind": "u100", "100m_v_component_of_wind": "v100",
-          "surface_solar_radiation_downwards": "ssrd",
+          "surface_solar_radiation_downwards": "ssrd", "surface_thermal_radiation_downwards": "strd",
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
           "mean_sea_level_pressure": "msl",
@@ -306,6 +307,7 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
     Raises:
         RuntimeError: If no valid keys could be loaded
     """
+    keys_file = "cdsapi_keys.json" if keys_file is None else keys_file
     try:
         if not os.path.exists(keys_file):
             logger.error(f"API keys file {keys_file} not found.")
@@ -336,22 +338,29 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
         raise RuntimeError(f"Error loading API keys from {keys_file}: {str(e)}")
 
 if __name__ == '__main__':
-    years = range(1940, 2025)
-    var = "u_component_of_wind"
-    dataset = "reanalysis-era5-pressure-levels"
-    pressure_level = "500"
-    
-    # Load API keys from JSON file
-    cdsapi_keys = load_api_keys()
-
+    ####################
+    # User Specification
+    ####################
+    years = range(2019, 2025)
+    variables = ["10m_u_component_of_wind", "10m_v_component_of_wind", "surface_thermal_radiation_downwards"] # variables = ["u_component_of_wind", "v_component_of_wind", "geopotential"]
+    dataset = "reanalysis-era5-single-levels"
+    pressure_level = None
+    api_keys_file = None
     # Number of workers per key
     workers_per_key = 2
     
+    ####################
+    # Program
+    ####################
+    # Load API keys from JSON file
+    cdsapi_keys = load_api_keys(api_keys_file)
+    # Convert single variable string to list, or keep as list if already a list
+    variables = [variables] if isinstance(variables, str) else variables
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
     logger.info("=== ERA5 Download Configuration ===")
     logger.info(f"Years: {years.start} to {years.stop-1}")
-    logger.info(f"Variable: {var}")
+    logger.info(f"Variables: {', '.join(variables)}")
     logger.info(f"Dataset: {dataset}")
     if pressure_level:
         logger.info(f"Pressure Level: {pressure_level} hPa")
@@ -369,8 +378,8 @@ if __name__ == '__main__':
         # Create a shared task queue
         shared_task_queue = manager.Queue()
         
-        # Fill the queue with all year tasks (without keys)
-        for year in years:
+        # Fill the queue with all year-variable combinations
+        for year, var in product(years, variables):
             # Create task without key - key will be added by the worker
             shared_task_queue.put((year, var, None, dataset, pressure_level))
         
