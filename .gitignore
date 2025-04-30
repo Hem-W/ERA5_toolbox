@@ -2,7 +2,7 @@
 *.json
 
 # Log files
-era5_download_*.log
+*.log
 
 # Python bytecode
 __pycache__/

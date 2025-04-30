@@ -15,7 +15,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.4.dev"
+__version__ = "0.1.4"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -341,8 +341,8 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2019, 2025)
-    variables = ["10m_u_component_of_wind", "10m_v_component_of_wind", "surface_thermal_radiation_downwards"] # variables = ["u_component_of_wind", "v_component_of_wind", "geopotential"]
+    years = range(2025, 2026)
+    variables = ["surface_thermal_radiation_downwards", "surface_solar_radiation_downwards", "total_precipitation"] # variables = ["u_component_of_wind", "v_component_of_wind", "geopotential"]
     dataset = "reanalysis-era5-single-levels"
     pressure_level = None
     api_keys_file = None

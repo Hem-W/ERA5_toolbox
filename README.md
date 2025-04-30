@@ -23,50 +23,71 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
    
    You can obtain CDS API keys by registering at https://cds.climate.copernicus.eu/
 
-3. Make sure the `cdsapi_keys.json` file is in the same directory as the script, or specify a different location in the `load_api_keys()` function call.
+3. Make sure the `cdsapi_keys.json` file is in the same directory as the script, or specify a different location in the `api_keys_file` parameter.
 
 ## Usage
 
-To download ERA5 data, simply run the script:
+To download ERA5 data, modify the user specifictions in the main section of `downloader_ERA5.py` and run:
 
 ```
 python -u downloader_ERA5.py
 ```
 
-### Single-Level Data
+### Configuration Parameters
 
-To download single-level ERA5 data, modify the main section:
+Edit these parameters in the main section of the script:
 
 ```python
-if __name__ == '__main__':
-    years = range(1940, 2025)
-    var = "toa_incident_solar_radiation"  # or any other single-level variable
-    dataset = "reanalysis-era5-single-levels"
-    pressure_level = None
-    # ...
+# User Specification
+years = range(2019, 2025)
+variables = "10m_u_component_of_wind"
+dataset = "reanalysis-era5-single-levels"
+pressure_level = None
+api_keys_file = None  # Use default 'cdsapi_keys.json'
+workers_per_key = 2   # Number of concurrent downloads per API key
 ```
 
-### Pressure-Level Data
+### Single-Level Data Example
 
-To download pressure-level ERA5 data, configure the parameters like this:
+To download single-level ERA5 data:
 
 ```python
-if __name__ == '__main__':
-    years = range(1940, 2025)
-    var = "geopotential"  # or any other pressure-level variable
-    dataset = "reanalysis-era5-pressure-levels"
-    pressure_level = "500"  # Pressure level in hPa
-    # ...
+years = range(1940, 2025)
+variables = ["toa_incident_solar_radiation", "2m_temperature", "total_precipitation"]
+dataset = "reanalysis-era5-single-levels"
+pressure_level = None
+```
+
+### Pressure-Level Data Example
+
+To download pressure-level ERA5 data:
+
+```python
+years = range(1940, 2025)
+variables = ["geopotential", "u_component_of_wind", "v_component_of_wind"]
+dataset = "reanalysis-era5-pressure-levels"
+pressure_level = "500"  # Pressure level in hPa
 ```
 
 ## Features
 
-- Dynamic task assignment system that automatically balances workload between API keys
-  - Faster keys will process more tasks, maximizing overall throughput
-- Each API key maintains two concurrent downloads for optimal performance
+- Dynamic task assignment system that automatically balances workload among multiple API keys
+  - Each API key can run multiple worker threads simultaneously
+  - Dynamically assigns API keys to tasks based on progress
+- Robust download mechanism:
+  - Automatic fallback download if the CDS API method fails
+  - Exponential backoff retry strategy for failed downloads
+  - Resume capability for interrupted downloads
 - Skips already downloaded files
 - Supports both ERA5 single-level and pressure-level datasets
-- Exponential backoff retry strategy for failed downloads
+
+## Output Files
+
+Output files are named with a standardized convention:
+- Single-level: `era5.reanalysis.[variable_shortname].1hr.0p25deg.global.[year].nc`
+- Pressure-level: `era5.reanalysis.[variable_shortname].[pressure_level]hpa.1hr.0p25deg.global.[year].nc`
+
+Variable short names are mapped from CDS API names using an internal dictionary.
 
 ## Security
 

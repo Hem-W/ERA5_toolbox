@@ -1,11 +1,15 @@
 # Changelog
 
-## [0.1.3] - 20250428
+## [0.1.4] - 20250430
 ### Added
+- Support for downloading multiple variables in a single request
+
+## [0.1.3] - 20250428
+### Changed
 - Enhanced error logging and simplified worker format in logging
 
 ## [0.1.2.dev] - 20250425
-### Added
+### Changed
 - JSON5 support for API keys configuration allowing comments in JSON
 - Improved handling of incomplete downloads when error occurs
 
