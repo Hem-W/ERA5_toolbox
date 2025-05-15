@@ -1,4 +1,12 @@
-# Download ERA5 data from CDS API
+"""
+Download ERA5 data from CDS API
+
+Author: Hui-Min Wang
+
+This script downloads ERA5 data from CDS API for specified years.
+"""
+
+
 import traceback
 import pathlib
 from itertools import product
@@ -33,13 +41,13 @@ logging.basicConfig(
 logger = logging.getLogger("ERA5_downloader")
 logger.info(f"ERA5 Downloader Version: {__version__}")
 
-VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", 
+VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", "2m_dewpoint_temperature": "d2m", 
           "10m_u_component_of_wind": "u10", "10m_v_component_of_wind": "v10", 
           "100m_u_component_of_wind": "u100", "100m_v_component_of_wind": "v100",
           "surface_solar_radiation_downwards": "ssrd", "surface_thermal_radiation_downwards": "strd",
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
-          "mean_sea_level_pressure": "msl",
+          "mean_sea_level_pressure": "msl", "surface_pressure": "sp",
           "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v"}
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
@@ -341,8 +349,8 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2025, 2026)
-    variables = ["surface_thermal_radiation_downwards", "surface_solar_radiation_downwards", "total_precipitation"] # variables = ["u_component_of_wind", "v_component_of_wind", "geopotential"]
+    years = range(2020, 2026)
+    variables = ["2m_dewpoint_temperature", "surface_pressure"]
     dataset = "reanalysis-era5-single-levels"
     pressure_level = None
     api_keys_file = None
