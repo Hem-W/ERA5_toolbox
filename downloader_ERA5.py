@@ -23,7 +23,7 @@ import urllib3
 import json5
 
 # Script version
-__version__ = "0.1.4"
+__version__ = "0.1.5.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -48,7 +48,8 @@ VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", "2m_dewpoint_tem
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
           "mean_sea_level_pressure": "msl", "surface_pressure": "sp",
-          "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v"}
+          "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v", 
+          "specific_humidity": "q", "divergence": "div", "temperature": "t"}
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
@@ -349,10 +350,10 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2020, 2026)
-    variables = ["2m_dewpoint_temperature", "surface_pressure"]
-    dataset = "reanalysis-era5-single-levels"
-    pressure_level = None
+    years = range(2003, 2022)
+    variables = ['u_component_of_wind', 'v_component_of_wind', 'specific_humidity', 'geopotential', 'temperature', 'divergence']
+    dataset = "reanalysis-era5-pressure-levels"
+    pressure_levels = [500, 700, 850]  # List of pressure levels (hPa)
     api_keys_file = None
     # Number of workers per key
     workers_per_key = 2
@@ -370,8 +371,10 @@ if __name__ == '__main__':
     logger.info(f"Years: {years.start} to {years.stop-1}")
     logger.info(f"Variables: {', '.join(variables)}")
     logger.info(f"Dataset: {dataset}")
-    if pressure_level:
-        logger.info(f"Pressure Level: {pressure_level} hPa")
+    # Convert single pressure level to list, or keep as list if already a list
+    pressure_levels = [pressure_levels] if isinstance(pressure_levels, (int, str)) else pressure_levels
+    if pressure_levels:
+        logger.info(f"Pressure Levels: {', '.join(str(p) for p in pressure_levels)} hPa")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
     logger.info(f"Workers per key: {workers_per_key}")
     logger.info("=================================")
@@ -386,10 +389,15 @@ if __name__ == '__main__':
         # Create a shared task queue
         shared_task_queue = manager.Queue()
         
-        # Fill the queue with all year-variable combinations
-        for year, var in product(years, variables):
-            # Create task without key - key will be added by the worker
-            shared_task_queue.put((year, var, None, dataset, pressure_level))
+        # Fill the queue with all year-variable-pressure_level combinations
+        if dataset == "reanalysis-era5-pressure-levels" and pressure_levels:
+            for year, var, level in product(years, variables, pressure_levels):
+                # Create task without key - key will be added by the worker
+                shared_task_queue.put((year, var, None, dataset, level))
+        else:
+            for year, var in product(years, variables):
+                # Create task without key - key will be added by the worker
+                shared_task_queue.put((year, var, None, dataset, None))
         
         logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
         
