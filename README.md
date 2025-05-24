@@ -22,7 +22,7 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 
 2. Install the required dependencies manually:
    ```bash
-   pip install cdsapi json5 tqdm urllib3 netcdf4
+   pip install cdsapi json5 tqdm urllib3 netcdf4 xarray
    ```
 
 ## Configuration

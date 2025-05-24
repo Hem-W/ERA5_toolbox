@@ -22,9 +22,10 @@ from tqdm import tqdm
 import urllib3
 import json5
 import netCDF4
+import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.0.dev"
+__version__ = "0.2.0.dev2"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -144,47 +145,46 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
 
 def get_variable_code_from_netcdf(nc_file, api_variable):
     """
-    Extract the actual variable code from a NetCDF file
-    
+    Extract the actual variable code from a NetCDF file using xarray.
     Args:
         nc_file: Path to the NetCDF file
         api_variable: The variable name used in the API request
-        
     Returns:
         str: The variable code as stored in the NetCDF file
     """
+    # Common auxiliary variables to exclude
+    excluded = {'number', 'expver'}
     try:
-        # Open the NetCDF file
-        dataset = netCDF4.Dataset(nc_file, 'r')
+        # Open the NetCDF file with xarray (xarray automatically filters coordinates)
+        ds = xr.open_dataset(nc_file)
         
-        # Get the variable names in the file
-        variables = list(dataset.variables.keys())
+        # Get data variables (non-coordinate variables)
+        data_vars = list(ds.data_vars)
         
-        # Close the dataset
-        dataset.close()
+        # Filter out auxiliary variables
+        candidates = [v for v in data_vars if v not in excluded]
         
-        # Exclude common dimension and coordinate variables
-        excluded = ['time', 'latitude', 'longitude', 'lat', 'lon', 'level']
-        actual_vars = [v for v in variables if v not in excluded]
-        
-        if len(actual_vars) == 1:
-            # If there's only one variable (excluding dimensions), use that
-            return actual_vars[0]
-        elif len(actual_vars) > 1:
-            # If there are multiple variables, log them and use the first one
-            logger.info(f"Multiple variables found in NetCDF file: {actual_vars}")
-            logger.info(f"Using first variable: {actual_vars[0]}")
-            return actual_vars[0]
+        # Return the appropriate variable
+        if api_variable in candidates:
+            var_code = api_variable
+        elif len(candidates) == 1:
+            var_code = candidates[0]
+        elif len(candidates) > 1:
+            logger.info(f"Multiple variables found in NetCDF file: {candidates}")
+            logger.info(f"Using first variable: {candidates[0]}")
+            var_code = candidates[0]
         else:
-            # Fallback to the original variable name if no clear variable is found
-            logger.warning(f"No clear variable found in NetCDF file, falling back to original name")
-            return api_variable
-            
+            logger.warning("No clear variable found, falling back to original name")
+            var_code = api_variable
+        
+        # Always close the dataset before returning
+        ds.close()
+        return var_code
+        
     except Exception as e:
-        logger.error(f"Error extracting variable from NetCDF file: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Fallback to the original variable name
+        logger.error(f"Error reading NetCDF file: {e}")
         return api_variable
+    
 
 def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None):
     """
@@ -442,23 +442,16 @@ if __name__ == '__main__':
     # User Specification
     ####################
     years = range(2003, 2022)
-    variables = ['convective_available_potential_energy', 'convective_inhibition', 
-                 'volumetric_soil_water_layer_1', 'volumetric_soil_water_layer_2', 'mean_vertically_integrated_moisture_divergence']
-    dataset = "reanalysis-era5-single-levels"
-    pressure_levels = None  # List of pressure levels (hPa)
+    variables = ['u_component_of_wind', 'v_component_of_wind', 'specific_humidity', 'geopotential', 'temperature', 'divergence']
+    dataset = "reanalysis-era5-pressure-levels"
+    pressure_levels = ['850','1000']  # List of pressure levels (hPa)
     api_keys_file = None
     workers_per_key = 2  # Number of workers per key
     skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
     # Optional: Provide short names for variables.
     # If skip_existing=True, short_names MUST be provided for reliable operation.
     # Example: short_names = {'convective_available_potential_energy': 'cape'}
-    short_names = {
-        'convective_available_potential_energy': 'cape', 
-        'convective_inhibition': 'cin',
-        'volumetric_soil_water_layer_1': 'swvl1', 
-        'volumetric_soil_water_layer_2': 'swvl2', 
-        'mean_vertically_integrated_moisture_divergence': 'avg_vimdf'
-    }
+    short_names = {'u_component_of_wind': 'u', 'v_component_of_wind': 'v'}
     
     ####################
     # Program
