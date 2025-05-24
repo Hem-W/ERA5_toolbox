@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.5.dev] - 20250521
+### Added
+- Support multiple pressure levels for ERA5 pressure levels dataset
+
 ## [0.1.4] - 20250430
 ### Added
 - Support for downloading multiple variables in a single request

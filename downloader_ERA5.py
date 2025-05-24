@@ -47,9 +47,13 @@ VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", "2m_dewpoint_tem
           "surface_solar_radiation_downwards": "ssrd", "surface_thermal_radiation_downwards": "strd",
           "toa_incident_solar_radiation": "tisr",
           "potential_evaporation": "pev", 
+          'convective_available_potential_energy': 'cape', 'convective_inhibition': 'ci',
+          'mean_vertically_integrated_moisture_divergence': 'mvid',
+          'volumetric_soil_water_layer_1': 'vswl1', 'volumetric_soil_water_layer_2': 'vswl2',
           "mean_sea_level_pressure": "msl", "surface_pressure": "sp",
           "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v", 
-          "specific_humidity": "q", "divergence": "div", "temperature": "t"}
+          "specific_humidity": "q", "divergence": "div", "temperature": "t",
+          }
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
@@ -351,9 +355,10 @@ if __name__ == '__main__':
     # User Specification
     ####################
     years = range(2003, 2022)
-    variables = ['u_component_of_wind', 'v_component_of_wind', 'specific_humidity', 'geopotential', 'temperature', 'divergence']
-    dataset = "reanalysis-era5-pressure-levels"
-    pressure_levels = [500, 700, 850]  # List of pressure levels (hPa)
+    variables = ['convective_available_potential_energy', 'convective_inhibition', 
+                 'volumetric_soil_water_layer_1', 'volumetric_soil_water_layer_2', 'mean_vertically_integrated_moisture_divergence']
+    dataset = "reanalysis-era5-single-levels"
+    pressure_levels = None  # List of pressure levels (hPa)
     api_keys_file = None
     # Number of workers per key
     workers_per_key = 2
