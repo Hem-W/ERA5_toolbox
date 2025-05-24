@@ -1,0 +1,11 @@
+name: era5_toolbox
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.12
+  - cdsapi
+  - netcdf4
+  - urllib3
+  - tqdm
+  - json5

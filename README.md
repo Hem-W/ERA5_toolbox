@@ -2,15 +2,32 @@
 
 A tool for downloading ERA5 climate data from the Copernicus Climate Data Store (CDS) using multiple API keys concurrently to improve download speeds.
 
-## Setup
+## Installation
 
-1. Install the required dependencies:
-   ```
-   pip install cdsapi json5 tqdm urllib3
+1. Clone or download this repository:
+   ```bash
+   git clone https://github.com/Hem-W/ERA5_toolbox.git
+   cd ERA5_toolbox
    ```
 
-2. Configure your API keys:
-   Create or modify the `cdsapi_keys.json` file with your CDS API keys:
+### Installation Method 1: Using Conda (Recommended)
+
+2. Create a conda environment using the provided environment.yml file:
+   ```bash
+   conda env create -f environment.yml
+   conda activate era5_toolbox
+   ```
+
+### Installation Method 2: Manual Installation
+
+2. Install the required dependencies manually:
+   ```bash
+   pip install cdsapi json5 tqdm urllib3 netcdf4
+   ```
+
+## Configuration
+
+3. Configure your API keys by creating or modifying the `cdsapi_keys.json` file:
    ```json5
    {
        "keys": [
@@ -23,11 +40,11 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
    
    You can obtain CDS API keys by registering at https://cds.climate.copernicus.eu/
 
-3. Make sure the `cdsapi_keys.json` file is in the same directory as the script, or specify a different location in the `api_keys_file` parameter.
+4. Make sure the `cdsapi_keys.json` file is in the same directory as the script, or specify a different location in the `api_keys_file` parameter.
 
 ## Usage
 
-To download ERA5 data, modify the user specifictions in the main section of `downloader_ERA5.py` and run:
+To download ERA5 data, modify the user specifications in the main section of `downloader_ERA5.py` and run:
 
 ```
 python -u downloader_ERA5.py
@@ -40,11 +57,18 @@ Edit these parameters in the main section of the script:
 ```python
 # User Specification
 years = range(2019, 2025)
-variables = "10m_u_component_of_wind"
+variables = ["10m_u_component_of_wind", "2m_temperature"]
 dataset = "reanalysis-era5-single-levels"
-pressure_level = None
+pressure_levels = None  # List of pressure levels (hPa)
 api_keys_file = None  # Use default 'cdsapi_keys.json'
-workers_per_key = 2   # Number of concurrent downloads per API key
+workers_per_key = 2  # Number of concurrent downloads per API key
+skip_existing = True  # Whether to skip downloading existing files
+
+# Optional: Provide short names for variables (recommended when skip_existing=True)
+short_names = {
+    '10m_u_component_of_wind': 'u10', 
+    '2m_temperature': 't2m'
+}
 ```
 
 ### Single-Level Data Example
@@ -55,7 +79,12 @@ To download single-level ERA5 data:
 years = range(1940, 2025)
 variables = ["toa_incident_solar_radiation", "2m_temperature", "total_precipitation"]
 dataset = "reanalysis-era5-single-levels"
-pressure_level = None
+# Define short names for better file naming and skipping existing files
+short_names = {
+    "toa_incident_solar_radiation": "tisr", 
+    "2m_temperature": "t2m", 
+    "total_precipitation": "tp"
+}
 ```
 
 ### Pressure-Level Data Example
@@ -66,7 +95,12 @@ To download pressure-level ERA5 data:
 years = range(1940, 2025)
 variables = ["geopotential", "u_component_of_wind", "v_component_of_wind"]
 dataset = "reanalysis-era5-pressure-levels"
-pressure_level = "500"  # Pressure level in hPa
+pressure_levels = ["500", "700"]  # Pressure levels in hPa
+short_names = {
+    "geopotential": "z", 
+    "u_component_of_wind": "u", 
+    "v_component_of_wind": "v"
+}
 ```
 
 ## Features
@@ -78,7 +112,10 @@ pressure_level = "500"  # Pressure level in hPa
   - Automatic fallback download if the CDS API method fails
   - Exponential backoff retry strategy for failed downloads
   - Resume capability for interrupted downloads
-- Skips already downloaded files
+- Smart file handling:
+  - Optional automatic variable code extraction from NetCDF files
+  - Skip existing files when provided with short names
+  - File naming based on actual variable codes
 - Supports both ERA5 single-level and pressure-level datasets
 
 ## Output Files
@@ -87,7 +124,9 @@ Output files are named with a standardized convention:
 - Single-level: `era5.reanalysis.[variable_shortname].1hr.0p25deg.global.[year].nc`
 - Pressure-level: `era5.reanalysis.[variable_shortname].[pressure_level]hpa.1hr.0p25deg.global.[year].nc`
 
-Variable short names are mapped from CDS API names using an internal dictionary.
+The variable short name can be:
+1. Provided by the user via the `short_names` dictionary (recommended)
+2. Automatically extracted from the downloaded NetCDF file (when `short_name` is not provided)
 
 ## Security
 
