@@ -9,3 +9,4 @@ dependencies:
   - urllib3
   - tqdm
   - json5
+  - xarray

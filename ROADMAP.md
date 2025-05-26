@@ -4,7 +4,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 
 ## Short-term Goals (Next Few Releases)
 
-- [ ] Add variable shortname recognition
+- [x] Add variable shortname recognition
 - [ ] Add support for ERA5-Land datasets
 - [ ] Add summary report for fast reviews after downloads
 

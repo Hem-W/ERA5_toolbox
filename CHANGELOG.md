@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.0] - 20250524
+### Changed
+- Improved variable code extraction using xarray instead of netCDF4, handling auxiliary variables like 'number' and 'expver'
+- Get variable short name recognition for automatically naming files when short_names is not provided (`short_names=None`)
+- Only skip existing files (`skip_existing=True`) when short_names is provided
+
+### Added
+- Added xarray as a dependency for better NetCDF file handling
+
 ## [0.1.5.dev] - 20250521
 ### Added
 - Support multiple pressure levels for ERA5 pressure levels dataset

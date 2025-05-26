@@ -25,7 +25,7 @@ import netCDF4
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.0.dev2"
+__version__ = "0.2.0"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
