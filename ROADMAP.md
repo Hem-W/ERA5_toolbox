@@ -13,6 +13,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 - [ ] Add option to download specific geographic regions
 - [ ] Add command-line arguments for easier configuration
 - [ ] Implement automatic data validation and quality checks
+- [ ] Distribute the client to different machines
 
 ## Community Features
 
