@@ -25,7 +25,7 @@ import netCDF4
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.0"
+__version__ = "0.2.1.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -217,7 +217,6 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         "data_format": "netcdf",
         "download_format": "unarchived"
     }
-    
     # Determine what to use for the filename (short_name if provided, otherwise variable name)
     var_name_for_file = short_name if short_name is not None else variable
     
@@ -235,68 +234,63 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
         if short_name is None:
             logger.warning(f"{log_prefix}skip_existing is True but no short_name provided for {variable}. Cannot reliably check for existing files.")
         else:
-            # Use the short_name directly for file pattern
             if dataset == "reanalysis-era5-pressure-levels":
                 file_pattern = f"era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
             else:
                 file_pattern = f"era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
             
-            # Check if file with exact short_name exists
             if os.path.exists(file_pattern):
                 logger.info(f"{log_prefix}Skip existing file {file_pattern} for variable {variable}")
-                return
+                return True
     
     logger.info(f"{log_prefix}Requesting {target}")
     
+    # Try two download methods
     try:
-        # Retrieve the data
+        # Submit request to cdsapi
         result = client.retrieve(dataset, request)
 
-        # Store the URL for potential fallback use
-        download_url = None
+        download_url = None # Store the URL for potential fallback use
         try:
             download_url = result.location
         except (AttributeError, Exception):
             logger.warning(f"{log_prefix}Could not get direct download URL, only use standard download")
         
-        # Try CDSAPI download first
         try:
-            # Use regular download method (original behavior)
+            # Download method 1: cdsapi
             result.download(target)
             logger.info(f"{log_prefix}Successfully downloaded {target} via cdsapi")
         except Exception as e:
-            # Log error when standard download fails
-            logger.error(f"{log_prefix}Download failed for {target}: {str(e)}")
+            logger.error(f"{log_prefix}Standard download failed for {target}: {str(e)}")
             logger.error(traceback.format_exc())
             
-            # Try direct download if we have the URL (for ANY error)
+            # Download method 2: urllib3
             if download_url:
-                logger.info(f"{log_prefix}Attempting download with urllib3 for {target}: {download_url}")
-                
-                # Try up to 3 times with urllib3
-                for attempt in range(1, 4):
-                    if attempt > 1:
-                        logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
-                    
-                    if download_file_with_urllib3(download_url, target):
-                        logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
-                        break  # Exit the retry loop on success
-                    
-                    # Wait before retry (exponential backoff)
-                    if attempt < 3:
-                        wait_time = 60 * (2 ** (attempt - 1))
-                        logger.info(f"{log_prefix}Waiting {wait_time} seconds before next attempt for {target} using urllib3")
-                        time.sleep(wait_time)
-                
-                # If we've reached this point, all download attempts failed
-                logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
-                return  # Exit the function since all download methods failed
+                try:
+                    # Try up to 3 times with urllib3
+                    for attempt in range(1, 4):
+                        if attempt > 1:
+                            logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
+                        
+                        if download_file_with_urllib3(download_url, target):
+                            logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
+                            break  # Exit the retry loop on success
+                        
+                        # Wait before retry (exponential backoff)
+                        if attempt < 3:
+                            wait_time = 60 * (2 ** (attempt - 1))
+                            logger.info(f"{log_prefix}Waiting {wait_time} seconds before next attempt for {target} using urllib3")
+                            time.sleep(wait_time)
+                            
+                except Exception as e:
+                    # If we've reached this point, all download attempts failed
+                    logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
+                    logger.error(traceback.format_exc())
+                    raise
             else:
-                logger.error(f"{log_prefix}No direct download URL available for fallback")
-                return  # Exit the function since no fallback method available
+                raise
         
-        # If we reach here, at least one download method succeeded
-        # Only extract the variable code from the file if short_name was not provided
+        # If download success then rename the file
         if short_name is None and os.path.exists(target):
             # Now determine the actual variable code from the file
             actual_var_code = get_variable_code_from_netcdf(target, variable)
@@ -311,19 +305,22 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
             if target != final_target:
                 # Check if the final target already exists
                 if os.path.exists(final_target):
-                    logger.warning(f"{log_prefix}Final target {final_target} already exists, removing temporary file")
+                    logger.warning(f"{log_prefix}Final target {final_target} already exists, removing redundant downloaded file {target}")
                     os.remove(target)
                 else:
                     # Rename the file
                     os.rename(target, final_target)
                     logger.info(f"{log_prefix}Renamed {target} to {final_target}")
-        
-        return  # Exit function successfully after download and potential rename
-            
+        return True
+                        
     except Exception as e:
+        # if reach here, it means download failed, then remove the broken file if exists
         logger.error(f"{log_prefix}Error downloading {year}: {str(e)}")
         logger.error(traceback.format_exc())
-        raise
+        if os.path.exists(target):
+            logger.info(f"{log_prefix}Remove broken file {target}")
+            os.remove(target)
+        return False
 
 def key_worker(key, task_queue, worker_index=""):
     """Worker that processes multiple tasks with a single environment setup"""
@@ -442,7 +439,7 @@ if __name__ == '__main__':
     # User Specification
     ####################
     years = range(2003, 2022)
-    variables = ['u_component_of_wind', 'v_component_of_wind', 'specific_humidity', 'geopotential', 'temperature', 'divergence']
+    variables = ['u_component_of_wind', 'v_component_of_wind'] #'specific_humidity', 'geopotential', 'temperature', 'divergence'
     dataset = "reanalysis-era5-pressure-levels"
     pressure_levels = ['850','1000']  # List of pressure levels (hPa)
     api_keys_file = None
@@ -451,7 +448,8 @@ if __name__ == '__main__':
     # Optional: Provide short names for variables.
     # If skip_existing=True, short_names MUST be provided for reliable operation.
     # Example: short_names = {'convective_available_potential_energy': 'cape'}
-    short_names = {'u_component_of_wind': 'u', 'v_component_of_wind': 'v'}
+    short_names = {'u_component_of_wind': 'u', 'v_component_of_wind': 'v', 
+                   'specific_humidity': 'q', 'geopotential': 'z', 'temperature': 't', 'divergence': 'd'}
     
     ####################
     # Program
