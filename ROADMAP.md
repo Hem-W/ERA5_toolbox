@@ -5,6 +5,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 ## Short-term Goals (Next Few Releases)
 
 - [x] Add variable shortname recognition
+- [ ] Allow no apikey file input (use .cdsapirc)
 - [ ] Add support for ERA5-Land datasets
 - [ ] Add summary report for fast reviews after downloads
 
@@ -13,7 +14,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 - [ ] Add option to download specific geographic regions
 - [ ] Add command-line arguments for easier configuration
 - [ ] Implement automatic data validation and quality checks
-- [ ] Distribute the client to different machines
+- [ ] Distribute clients to different machines
 
 ## Community Features
 
@@ -24,7 +25,6 @@ This document outlines the planned future development for the ERA5 Toolbox.
 
 - Implement time period subsetting (specific months/days)
 - Improve test coverage and add automated testing (for techinical)
-- Refactor code for better modularity
 
 ## How to Contribute
 

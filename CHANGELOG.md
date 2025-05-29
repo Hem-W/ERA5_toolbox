@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.2.1.dev] - 20250528
+### Fixed
+- Fixed the logic of using urllib3 to download failed tasks from cdsapi
+
 ## [0.2.0] - 20250524
 ### Changed
 - Improved variable code extraction using xarray instead of netCDF4, handling auxiliary variables like 'number' and 'expver'

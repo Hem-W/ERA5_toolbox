@@ -439,10 +439,10 @@ if __name__ == '__main__':
     # User Specification
     ####################
     years = range(2003, 2022)
-    variables = ['u_component_of_wind', 'v_component_of_wind'] #'specific_humidity', 'geopotential', 'temperature', 'divergence'
+    variables = ['specific_humidity', 'geopotential', 'temperature', 'divergence']
     dataset = "reanalysis-era5-pressure-levels"
     pressure_levels = ['850','1000']  # List of pressure levels (hPa)
-    api_keys_file = None
+    api_keys_file = None # Use default 'cdsapi_keys.json'
     workers_per_key = 2  # Number of workers per key
     skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
     # Optional: Provide short names for variables.
@@ -456,8 +456,6 @@ if __name__ == '__main__':
     ####################
     # Load API keys from JSON file
     cdsapi_keys = load_api_keys(api_keys_file)
-    # Convert single variable string to list, or keep as list if already a list
-    variables = [variables] if isinstance(variables, str) else variables
     # Validate configuration
     if skip_existing and not short_names:
         logger.warning("skip_existing is True but no short_names provided. This may cause files to be re-downloaded.")
@@ -466,6 +464,8 @@ if __name__ == '__main__':
     key_prefixes = [key[:4] for key in cdsapi_keys]
     logger.info("=== ERA5 Download Configuration ===")
     logger.info(f"Years: {years.start} to {years.stop-1}")
+    # Convert single variable string to list, or keep as list if already a list
+    variables = [variables] if isinstance(variables, str) else variables
     logger.info(f"Variables: {', '.join(variables)}")
     logger.info(f"Dataset: {dataset}")
     # Convert single pressure level to list, or keep as list if already a list
