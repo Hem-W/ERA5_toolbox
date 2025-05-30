@@ -9,9 +9,9 @@ For accumulated variables like precipitation (tp), a time shift can be applied
 to correctly align the data with the daily periods.
 
 Usage:
-    python resampler_ERA5.py --years 2020 --variable tp --input_dir /path/to/input --output_dir /path/to/output --chunk_size 200 --workers 4 --threads 2 --method sum --time_shift_hours -1
-    python resampler_ERA5.py --years $(seq 2020 2025) --variable tp --input_dir /path/to/input --output_dir /path/to/output --chunk_size 200 --workers 4 --threads 2 --method sum --time_shift_hours -1
-    python resampler_ERA5.py --years 2020 --variable tp --input_dir /path/to/input --output_dir /path/to/output --chunk_size 200 --workers 4 --threads 2 --method sum --time_shift_hours -1 --log_level DEBUG --log_dir /path/to/log
+    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1
+    python resampler_ERA5.py $(seq 2020 2025) --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1
+    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1 --log-level DEBUG --log-dir /path/to/log
 """
 
 import xarray as xr
@@ -59,7 +59,7 @@ def setup_logging(log_level=logging.INFO, log_dir=None):
 
 
 def process_year(year, variable="tp", input_dir='./', output_dir='./day', 
-                 chunk_size=200, client=None, method="sum", time_shift_hours=-1):
+                 chunk_size=200, client=None, method="sum", time_shift_hours=None):
     """
     Process a single year of hourly ERA5 data to daily statistics
     
@@ -79,15 +79,12 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         Dask client for parallel processing
     method : str
         Aggregation method: "sum", "mean", "max", or "min" (default: "sum")
-    time_shift_hours : int
-        Time shift in hours (default: -1). Negative for forward shift, positive for backward shift.
+    time_shift_hours : int or None
+        Time shift in hours (default: None). Use 'none' for no time shift.
+        Negative for forward shift, positive for backward shift.
     """
     logger = logging.getLogger("ERA5_resampler")
     
-    logger.info(f"Processing year {year} for variable {variable} with time shift of {time_shift_hours} hours...")
-    
-    # Determine which files to open based on time_shift_hours
-    files_to_open = []
     current_file = os.path.join(input_dir, f"era5.reanalysis.{variable}.1hr.0p25deg.global.{year}.nc")
     
     # We need the current year file regardless of time shift
@@ -95,6 +92,39 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         logger.error(f"Current year file not found: {current_file}")
         raise FileNotFoundError(f"Current year file not found: {current_file}")
     
+    # Determine time_shift_hours based on data type if not explicitly set
+    if time_shift_hours is None:
+        try:
+            # Open the NetCDF file and read the attribute
+            with xr.open_dataset(current_file) as temp_ds:
+                # Get the first (and typically only) data variable name
+                data_var = list(temp_ds.data_vars)[0]
+                
+                # Check if the GRIB_stepType attribute exists
+                if 'GRIB_stepType' in temp_ds[data_var].attrs:
+                    step_type = temp_ds[data_var].attrs['GRIB_stepType']
+                    logger.info(f"Found GRIB_stepType attribute: {step_type}")
+                    
+                    if step_type in ["accum", "avg", "mean"]:
+                        time_shift_hours = -1
+                        logger.info(f"Setting time_shift_hours = -1 for accumulated variable")
+                    elif step_type == "instant":
+                        time_shift_hours = 0
+                        logger.info(f"Setting time_shift_hours = 0 for instantaneous variable")
+                    else:
+                        logger.warning(f"Unknown GRIB_stepType: {step_type}, defaulting to time_shift_hours = 0")
+                        time_shift_hours = 0
+                else:
+                    logger.warning(f"No GRIB_stepType attribute found, defaulting to time_shift_hours = 0")
+                    time_shift_hours = 0
+        except Exception as e:
+            logger.warning(f"Could not determine time shift from file metadata: {str(e)}. Using time_shift_hours = 0")
+            time_shift_hours = 0
+        
+    logger.info(f"Processing year {year} for variable {variable} with time shift of {time_shift_hours} hours...")
+    
+    # Determine which files to open based on time_shift_hours
+    files_to_open = []
     files_to_open.append(current_file)
     
     # For negative time shift, we need the next year's data
@@ -200,8 +230,8 @@ def main():
     parser.add_argument('--method', type=str, choices=['sum', 'mean', 'max', 'min'],
                       default='sum', help='Aggregation method for daily statistics')
     parser.add_argument(
-        '--time-shift-hours', type=int, default=0,
-        help="Time shift in hours (default: 0).\n"
+        '--time-shift-hours', type=lambda x: None if x.lower() == 'none' else int(x), default=None,
+        help="Time shift in hours (default: None). Use 'none' for no time shift.\n"
              "Negative for forward shift, positive for backward shift.\n"
              "-1 is normally used for accumulated variables like precipitation."
     )
