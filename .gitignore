@@ -16,3 +16,6 @@ __pycache__/
 # Test notebooks
 notebooks/test_*.ipynb
 notebooks/check_*.ipynb
+
+# Template
+template/

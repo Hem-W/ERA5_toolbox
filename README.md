@@ -2,6 +2,20 @@
 
 A tool for downloading ERA5 climate data from the Copernicus Climate Data Store (CDS) using multiple API keys concurrently to improve download speeds.
 
+## Features
+
+- Dynamic task assignment system that automatically balances workload among multiple API keys
+  - Each API key can run multiple worker threads simultaneously (Two workers per API key is recommended by default, as one for active downloading and the other one for queueing on the server side.)
+  - Dynamic task submission for worker threads based on progress
+- Robust download mechanism:
+  - Automatic fallback download if the CDS API method fails
+  - Exponential backoff retry strategy for failed downloads
+  - Resumable for interrupted downloads
+- Smart file handling:
+  - Optional automatic variable short name extraction from NetCDF files
+  - Skip existing files when provided with short names
+- Supports both ERA5 single-level and pressure-level datasets
+
 ## Installation
 
 1. Clone or download this repository:
@@ -103,24 +117,9 @@ short_names = {
 }
 ```
 
-## Features
+## Output File Naming Pattern
 
-- Dynamic task assignment system that automatically balances workload among multiple API keys
-  - Each API key can run multiple worker threads simultaneously
-  - Dynamically assigns API keys to tasks based on progress
-- Robust download mechanism:
-  - Automatic fallback download if the CDS API method fails
-  - Exponential backoff retry strategy for failed downloads
-  - Resume capability for interrupted downloads
-- Smart file handling:
-  - Optional automatic variable code extraction from NetCDF files
-  - Skip existing files when provided with short names
-  - File naming based on actual variable codes
-- Supports both ERA5 single-level and pressure-level datasets
-
-## Output Files
-
-Output files are named with a standardized convention:
+Output files are named with a prescribed pattern:
 - Single-level: `era5.reanalysis.[variable_shortname].1hr.0p25deg.global.[year].nc`
 - Pressure-level: `era5.reanalysis.[variable_shortname].[pressure_level]hpa.1hr.0p25deg.global.[year].nc`
 
@@ -128,7 +127,7 @@ The variable short name can be:
 1. Provided by the user via the `short_names` dictionary (recommended)
 2. Automatically extracted from the downloaded NetCDF file (when `short_name` is not provided)
 
-## Security
+## API Key Security
 
 The script loads API keys from a separate JSON file, which:
 - Keeps sensitive credentials out of source code

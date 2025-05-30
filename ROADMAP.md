@@ -6,6 +6,9 @@ This document outlines the planned future development for the ERA5 Toolbox.
 
 - [x] Add variable shortname recognition
 - [ ] Allow no apikey file input (use .cdsapirc)
+- [ ] Add CLI interface
+    - [ ] Add yaml template for input parameters
+    - [ ] Improve logging launch logic
 - [ ] Add support for ERA5-Land datasets
 - [ ] Add summary report for fast reviews after downloads
 
