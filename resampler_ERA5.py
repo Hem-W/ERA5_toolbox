@@ -92,6 +92,8 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         logger.error(f"Current year file not found: {current_file}")
         raise FileNotFoundError(f"Current year file not found: {current_file}")
     
+    # TODO: get data_var from current_file for later use; decouple "variable" in file name from data_var
+    
     # Determine time_shift_hours based on data type if not explicitly set
     if time_shift_hours is None:
         try:
@@ -186,7 +188,7 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         )
         
         # Compute the result
-        logger.info("Computing results...")
+        # logger.info("Computing results...")
         ds_daily = ds_daily.compute()
         
         # Create output directory if it doesn't exist
@@ -196,11 +198,11 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         output_file = os.path.join(output_dir, f"era5.reanalysis.{variable}.day{method}.0p25deg.global.{year}.nc")
         logger.info(f"Saving output to {output_file}")
         encoding = {
-            variable: {
-                'chunksizes': (74, 145, 288),  # Time, lat, lon chunks
+            list(ds_daily.data_vars.keys())[0]: {
+                # 'chunksizes': (74, 145, 288),  # Time, lat, lon chunks
                 'zlib': True, 'complevel': 1,
-                'shuffle': True,
-                }
+                # 'shuffle': True,
+            }
         }
         ds_daily.to_netcdf(output_file, encoding=encoding)
         
