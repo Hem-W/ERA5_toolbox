@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.1.dev] - 20250528
+## [0.2.1] - 20250528
 ### Fixed
 - Fixed the logic of using urllib3 to download failed tasks from cdsapi
 

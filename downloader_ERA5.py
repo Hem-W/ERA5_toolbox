@@ -21,11 +21,10 @@ import sys
 from tqdm import tqdm
 import urllib3
 import json5
-import netCDF4
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.1.dev"
+__version__ = "0.2.1"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -438,18 +437,17 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2003, 2022)
-    variables = ['specific_humidity', 'geopotential', 'temperature', 'divergence']
-    dataset = "reanalysis-era5-pressure-levels"
-    pressure_levels = ['850','1000']  # List of pressure levels (hPa)
+    years = range(2022, 2023)
+    variables = ['mean_vertically_integrated_moisture_divergence']
+    dataset = "reanalysis-era5-single-levels"
+    pressure_levels = None  # List of pressure levels (hPa)
     api_keys_file = None # Use default 'cdsapi_keys.json'
     workers_per_key = 2  # Number of workers per key
     skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
     # Optional: Provide short names for variables.
     # If skip_existing=True, short_names MUST be provided for reliable operation.
     # Example: short_names = {'convective_available_potential_energy': 'cape'}
-    short_names = {'u_component_of_wind': 'u', 'v_component_of_wind': 'v', 
-                   'specific_humidity': 'q', 'geopotential': 'z', 'temperature': 't', 'divergence': 'd'}
+    short_names = {'mean_vertically_integrated_moisture_divergence': 'avg_vimdf'}
     
     ####################
     # Program
