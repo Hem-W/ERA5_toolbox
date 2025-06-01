@@ -149,7 +149,6 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
             logger.warning(f"Previous year file not found: {prev_year_file}")
             logger.warning(f"Processing with just the current year file (January 1 may have incomplete data)")
     
-    # Determine time range based on time_shift_hours
     # We need to extend our selection window by the absolute time shift to ensure enough data
     start_date = datetime(year, 1, 1)
     end_date = datetime(year + 1, 1, 1)
@@ -175,6 +174,12 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
                           chunks={"valid_time": -1}).sel(
                               valid_time=time_slice
                           ).chunk({"latitude": chunk_size, "longitude": chunk_size})
+    
+    # Examine "method" based on ds[data_var].attrs['GRIB_stepType']
+    # Expect `method="sum"` for accumulated variables
+    if ds[data_var].attrs['GRIB_stepType'] == 'accum':
+        if method != 'sum':
+            logger.warning(f"Step type of {data_var} is 'accum', but method is '{method}'. Please examine the method setting.")
     
     try:
         # Calculate daily statistics with the specified time shift
