@@ -20,6 +20,7 @@ import dask.distributed
 import argparse
 import os
 import logging
+import gc
 from datetime import datetime, timedelta
 
 
@@ -216,6 +217,10 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
         # Ensure dataset is closed to release resources
         logger.info("Closing dataset")
         ds.close()
+        
+        # Force garbage collection to free memory
+        logger.info("Running garbage collection")
+        gc.collect()
 
 
 def main():
