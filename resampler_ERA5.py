@@ -59,13 +59,13 @@ def setup_logging(log_level=logging.INFO, log_dir=None):
     # Configure logging
     logging.basicConfig(
         level=log_level,
-        format='%(asctime)s - %(levelname)s - %(message)s',
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file),
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger("ERA5_resampler")
+    return logging.getLogger("ERA5_toolbox.resampler_ERA5")
 
 
 def process_year(year, variable="tp", input_dir='./', output_dir='./day', 
@@ -284,17 +284,29 @@ def main():
                 method=args.method,
                 time_shift_hours=args.time_shift_hours
             )
+        logger.info("All years processed successfully")
     except Exception as e:
         logger.exception(f"Error during processing: {str(e)}")
-        raise
+        # Don't re-raise the exception to allow cleanup to happen
     finally:
         # Ensure client is closed even if an error occurs
         logger.info("Closing dask client")
         client.close()
+    
+    return args
 
 
 if __name__ == "__main__":
+    # Get a consistent logger instance
+    logger = logging.getLogger("ERA5_toolbox.resampler_ERA5")
     start_time = datetime.now()
-    main()
-    end_time = datetime.now()
-    logging.info(f"Total processing time: {end_time - start_time}")
+    
+    try:
+        main()
+    except Exception as e:
+        # Log any uncaught exceptions at the highest level
+        logger.critical(f"Fatal error in main program: {str(e)}", exc_info=True)
+    finally:
+        # Always log total processing time, even if there was an error
+        end_time = datetime.now()
+        logger.info(f"Total processing time: {end_time - start_time}")
