@@ -8,10 +8,19 @@ This script converts ERA5 hourly data to daily statistics (sum, mean, max, or mi
 For accumulated variables like precipitation (tp), a time shift can be applied
 to correctly align the data with the daily periods.
 
+Features:
+    + dask distributed: memory limit auto determined by RAM/number of workers
+
 Usage:
-    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1
-    python resampler_ERA5.py $(seq 2020 2025) --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1
-    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 200 --workers 4 --threads 2 --method sum --time-shift-hours -1 --log-level DEBUG --log-dir /path/to/log
+    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 180 --workers 4 --threads 2 --method sum --time-shift-hours -1
+    python resampler_ERA5.py $(seq 2020 2025) --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 180 --workers 4 --threads 2 --method sum --time-shift-hours -1
+    python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 180 --workers 4 --threads 2 --method sum --time-shift-hours -1 --log-level DEBUG --log-dir /path/to/log
+    
+Advanced Usage:
+    + multiple variables
+        for var in swvl1 swvl2; do python resampler_ERA5.py $(seq 2003 2021) --variable $var --input-dir hour/${var} --output-dir day/${var} --workers 10 --method mean; done
+    + include pressure levels
+        for var in d q t; do for pres in 500hpa 1000hpa; do combined="${var}.${pres}"; python resampler_ERA5.py $(seq 2003 2021) --variable $combined --input-dir hour/${var} --output-dir day/${var} --workers 20 --method mean --chunk-size 150; done; done
 """
 
 import xarray as xr
@@ -60,7 +69,7 @@ def setup_logging(log_level=logging.INFO, log_dir=None):
 
 
 def process_year(year, variable="tp", input_dir='./', output_dir='./day', 
-                 chunk_size=200, client=None, method="sum", time_shift_hours=None):
+                 chunk_size=180, client=None, method="sum", time_shift_hours=None):
     """
     Process a single year of hourly ERA5 data to daily statistics
     
@@ -237,7 +246,7 @@ def main():
                       help='Number of dask workers')
     parser.add_argument('--threads', type=int, default=2, 
                       help='Threads per dask worker')
-    parser.add_argument('--chunk-size', type=int, default=200, 
+    parser.add_argument('--chunk-size', type=int, default=180, 
                       help='Chunk size for spatial dimensions')
     parser.add_argument('--method', type=str, choices=['sum', 'mean', 'max', 'min'],
                       default='sum', help='Aggregation method for daily statistics')
