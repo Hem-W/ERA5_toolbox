@@ -24,7 +24,7 @@ import json5
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.1"
+__version__ = "0.2.2.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -39,24 +39,8 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("ERA5_downloader")
+logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 logger.info(f"ERA5 Downloader Version: {__version__}")
-
-# Deprecated VB_MAP - kept for backward compatibility but no longer used by default
-# Will be removed in a future version
-VB_MAP = {"2m_temperature": "t2m", "total_precipitation": "tp", "2m_dewpoint_temperature": "d2m", 
-          "10m_u_component_of_wind": "u10", "10m_v_component_of_wind": "v10", 
-          "100m_u_component_of_wind": "u100", "100m_v_component_of_wind": "v100",
-          "surface_solar_radiation_downwards": "ssrd", "surface_thermal_radiation_downwards": "strd",
-          "toa_incident_solar_radiation": "tisr",
-          "potential_evaporation": "pev", 
-          'convective_available_potential_energy': 'cape', 'convective_inhibition': 'ci',
-          'mean_vertically_integrated_moisture_divergence': 'mvid',
-          'volumetric_soil_water_layer_1': 'vswl1', 'volumetric_soil_water_layer_2': 'vswl2',
-          "mean_sea_level_pressure": "msl", "surface_pressure": "sp",
-          "geopotential": "z", "u_component_of_wind": "u", "v_component_of_wind": "v", 
-          "specific_humidity": "q", "divergence": "div", "temperature": "t",
-          }
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
