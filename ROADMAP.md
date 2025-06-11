@@ -4,7 +4,9 @@ This document outlines the planned future development for the ERA5 Toolbox.
 
 ## Short-term Goals (Next Few Releases)
 
-- [x] Add variable shortname recognition
+- [ ] update variable shortname recognition
+    - [ ] Utilize https://codes.ecmwf.int/grib/param-db/; OR
+    - [ ] conduct a test run on grib2 to use ecCodes
 - [ ] Allow no apikey file input (use .cdsapirc)
 - [ ] Add CLI interface
     - [ ] Add yaml template for input parameters
