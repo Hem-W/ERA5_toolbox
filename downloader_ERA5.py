@@ -24,7 +24,54 @@ import json5
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.2.2.dev"
+__version__ = "0.3.0.dev"
+
+# Dataset configurations
+DATASET_CONFIGS = {
+    "reanalysis-era5-single-levels": {
+        "request_template": {
+            'product_type': ['reanalysis'],
+            'month': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'],
+            'day': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31'],
+            'time': ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00'],
+            "data_format": "netcdf",
+            "download_format": "unarchived"
+        },
+        "filename_template": "era5.reanalysis.{variable}.1hr.0p25deg.global.{year}.nc",
+        "filename_template_pressure": "era5.reanalysis.{variable}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+    },
+    "reanalysis-era5-pressure-levels": {
+        "request_template": {
+            'product_type': ['reanalysis'],
+            'month': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'],
+            'day': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31'],
+            'time': ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00'],
+            "data_format": "netcdf",
+            "download_format": "unarchived"
+        },
+        "filename_template": "era5.reanalysis.{variable}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc",
+        "requires_pressure_level": True
+    },
+    "cems-fire-historical-v1": {
+        "request_template": {
+            "product_type": "reanalysis",
+            "dataset_type": "consolidated_dataset",
+            "system_version": ["4_1"],
+            "month": [
+                "01", "02", "03", "04", "05", "06",
+                "07", "08", "09", "10", "11", "12"
+            ],
+            "day": [
+                "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12",
+                "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
+                "25", "26", "27", "28", "29", "30", "31"
+            ],
+            "grid": "original_grid",
+            "data_format": "netcdf"
+        },
+        "filename_template": "cems.fire.{variable}.{year}.nc"
+    }
+}
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -169,58 +216,86 @@ def get_variable_code_from_netcdf(nc_file, api_variable):
         return api_variable
     
 
-def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None):
+def download_with_client(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None, custom_request=None):
     """
-    Download ERA5 data using an existing CDS client
+    Download data using an existing CDS client with configurable dataset support
     
-    This function reuses an existing CDS client to avoid creating a new client for each download
+    This function reuses an existing CDS client to avoid creating a new client for each download.
+    Supports multiple datasets through the DATASET_CONFIGS configuration system.
     
     Args:
         client: Existing CDS client
         year: Year to download
         variable: Variable to download
-        dataset: Dataset name
+        dataset: Dataset name (must be in DATASET_CONFIGS)
         pressure_level: Pressure level (for pressure level dataset)
         skip_existing: Whether to skip if file exists
         worker_id: Optional identifier for the worker running this download
         short_name: Optional short name for the variable to use in filename. If None, 
                    the full variable name will be used initially and then updated 
                    with the actual variable code from the file.
+        custom_request: Optional custom request parameters to override defaults
     """
     # Create context prefix for logs if worker_id is provided
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
     
-    request = {
-        'product_type': ['reanalysis'],
-        'variable': [variable],
-        'year': [str(year) if isinstance(year, int) else year],
-        'month': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'],
-        'day': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31'],
-        'time': ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00'],
-        "data_format": "netcdf",
-        "download_format": "unarchived"
-    }
+    # Get dataset configuration
+    if dataset not in DATASET_CONFIGS:
+        raise ValueError(f"Unsupported dataset: {dataset}. Supported datasets: {list(DATASET_CONFIGS.keys())}")
+    
+    config = DATASET_CONFIGS[dataset]
+    
+    # Start with the template request
+    request = config["request_template"].copy()
+    
+    # Add variable and year
+    request['variable'] = [variable]
+    request['year'] = [str(year) if isinstance(year, int) else year]
+    
+    # Handle pressure levels if required
+    if config.get("requires_pressure_level", False) or pressure_level is not None:
+        if pressure_level is None:
+            raise ValueError(f"pressure_level is required for {dataset} dataset")
+        request["pressure_level"] = [pressure_level]
+    
+    # Apply custom request parameters if provided
+    if custom_request:
+        request.update(custom_request)
+    
     # Determine what to use for the filename (short_name if provided, otherwise variable name)
     var_name_for_file = short_name if short_name is not None else variable
     
-    if dataset == "reanalysis-era5-pressure-levels":
-        if pressure_level is None:
-            raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
-        request["pressure_level"] = [pressure_level]
-        target = f"era5.reanalysis.{var_name_for_file}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+    # Generate target filename based on dataset configuration
+    if pressure_level is not None and "filename_template_pressure" in config:
+        target = config["filename_template_pressure"].format(
+            variable=var_name_for_file, 
+            pressure_level=pressure_level, 
+            year=year
+        )
     else:
-        target = f"era5.reanalysis.{var_name_for_file}.1hr.0p25deg.global.{year}.nc"
+        target = config["filename_template"].format(
+            variable=var_name_for_file, 
+            year=year
+        )
     
     # Check for existing files if skip_existing is enabled
     if skip_existing:
-        # For skipping existing files, short_name must be provided
+        # For skipping existing files, short_name must be provided for reliable checking
         if short_name is None:
             logger.warning(f"{log_prefix}skip_existing is True but no short_name provided for {variable}. Cannot reliably check for existing files.")
         else:
-            if dataset == "reanalysis-era5-pressure-levels":
-                file_pattern = f"era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+            # Generate check filename using short_name
+            if pressure_level is not None and "filename_template_pressure" in config:
+                file_pattern = config["filename_template_pressure"].format(
+                    variable=short_name, 
+                    pressure_level=pressure_level, 
+                    year=year
+                )
             else:
-                file_pattern = f"era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
+                file_pattern = config["filename_template"].format(
+                    variable=short_name, 
+                    year=year
+                )
             
             if os.path.exists(file_pattern):
                 logger.info(f"{log_prefix}Skip existing file {file_pattern} for variable {variable}")
@@ -278,11 +353,18 @@ def download_with_client(client, year, variable, dataset="reanalysis-era5-single
             # Now determine the actual variable code from the file
             actual_var_code = get_variable_code_from_netcdf(target, variable)
             
-            # Rename the file with the correct variable code
-            if dataset == "reanalysis-era5-pressure-levels":
-                final_target = f"era5.reanalysis.{actual_var_code}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+            # Generate final filename using the actual variable code
+            if pressure_level is not None and "filename_template_pressure" in config:
+                final_target = config["filename_template_pressure"].format(
+                    variable=actual_var_code, 
+                    pressure_level=pressure_level, 
+                    year=year
+                )
             else:
-                final_target = f"era5.reanalysis.{actual_var_code}.1hr.0p25deg.global.{year}.nc"
+                final_target = config["filename_template"].format(
+                    variable=actual_var_code, 
+                    year=year
+                )
                 
             # Only rename if the filenames are different
             if target != final_target:
@@ -324,12 +406,21 @@ def key_worker(key, task_queue, worker_index=""):
                     task_queue.task_done()
                     break
                 
-                # Unpack task - always expect short_name and skip_existing parameters
-                year, variable, _, dataset, pressure_level, short_name, skip_existing = task
+                # Unpack task - handle both old and new task formats
+                if len(task) == 7:
+                    # Old format: year, variable, _, dataset, pressure_level, short_name, skip_existing
+                    year, variable, _, dataset, pressure_level, short_name, skip_existing = task
+                    custom_request = None
+                elif len(task) == 8:
+                    # New format: year, variable, _, dataset, pressure_level, short_name, skip_existing, custom_request
+                    year, variable, _, dataset, pressure_level, short_name, skip_existing, custom_request = task
+                else:
+                    logger.error(f"Worker {worker_id} received invalid task format: {task}")
+                    continue
                 
                 # Process task with existing client
                 try:
-                    download_with_client(client, year, variable, dataset, pressure_level, skip_existing, worker_id=worker_id, short_name=short_name)
+                    download_with_client(client, year, variable, dataset, pressure_level, skip_existing, worker_id=worker_id, short_name=short_name, custom_request=custom_request)
                     task_count += 1
                 except Exception as e:
                     # Skip redundant error logging since download_with_client already logs errors
@@ -421,17 +512,40 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2022, 2023)
-    variables = ['mean_vertically_integrated_moisture_divergence']
-    dataset = "reanalysis-era5-single-levels"
-    pressure_levels = None  # List of pressure levels (hPa)
+    
+    # === CONFIGURATION EXAMPLES ===
+    # Choose one of the following configurations:
+    
+    # Example 1: ERA5 Pressure Levels
+    years = range(1998, 2003)
+    variables = ['u_component_of_wind', 'v_component_of_wind']
+    dataset = "reanalysis-era5-pressure-levels"
+    pressure_levels = [1000]  # List of pressure levels (hPa)
+    short_names = {'u_component_of_wind': 'u', 'v_component_of_wind': 'v'}
+    custom_request = None  # Use default request parameters
+    
+    # Example 2: ERA5 Single Levels
+    # years = range(2000, 2002)
+    # variables = ['2m_temperature', '10m_u_component_of_wind']
+    # dataset = "reanalysis-era5-single-levels"
+    # pressure_levels = None
+    # short_names = {'2m_temperature': 't2m', '10m_u_component_of_wind': 'u10'}
+    # custom_request = None
+    
+    # Example 3: CEMS Fire Historical
+    # years = range(2000, 2001)
+    # variables = ['fire_weather_index']
+    # dataset = "cems-fire-historical-v1"
+    # pressure_levels = None
+    # short_names = {'fire_weather_index': 'fwi'}
+    # custom_request = None  # Uses default CEMS configuration
+    
+    # === COMMON SETTINGS ===
     api_keys_file = None # Use default 'cdsapi_keys.json'
     workers_per_key = 2  # Number of workers per key
     skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
-    # Optional: Provide short names for variables.
-    # If skip_existing=True, short_names MUST be provided for reliable operation.
-    # Example: short_names = {'convective_available_potential_energy': 'cape'}
-    short_names = {'mean_vertically_integrated_moisture_divergence': 'avg_vimdf'}
+    
+    # Note: If skip_existing=True, short_names MUST be provided for reliable operation.
     
     ####################
     # Program
@@ -444,7 +558,7 @@ if __name__ == '__main__':
     
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
-    logger.info("=== ERA5 Download Configuration ===")
+    logger.info("=== Download Configuration ===")
     logger.info(f"Years: {years.start} to {years.stop-1}")
     # Convert single variable string to list, or keep as list if already a list
     variables = [variables] if isinstance(variables, str) else variables
@@ -461,7 +575,7 @@ if __name__ == '__main__':
         logger.info(f"Using short names: {short_names}")
     logger.info("=================================")
     
-    logger.info("Starting ERA5 download process with dynamic task assignment")
+    logger.info("Starting download process with dynamic task assignment")
     
     # Track start time
     start_time = time.time()
@@ -471,19 +585,20 @@ if __name__ == '__main__':
         # Create a shared task queue
         shared_task_queue = manager.Queue()
         
-        # Fill the queue with all year-variable-pressure_level combinations
-        if dataset == "reanalysis-era5-pressure-levels" and pressure_levels:
+        # Fill the queue with all year-variable combinations
+        # Handle pressure levels if the dataset requires them
+        if dataset in DATASET_CONFIGS and DATASET_CONFIGS[dataset].get("requires_pressure_level", False) and pressure_levels:
             for year, var, level in product(years, variables, pressure_levels):
                 # Get short_name if available
                 var_short_name = short_names.get(var) if short_names else None
-                # Create task without key - key will be added by the worker
-                shared_task_queue.put((year, var, None, dataset, level, var_short_name, skip_existing))
+                # Create task with custom_request parameter
+                shared_task_queue.put((year, var, None, dataset, level, var_short_name, skip_existing, custom_request))
         else:
             for year, var in product(years, variables):
                 # Get short_name if available
                 var_short_name = short_names.get(var) if short_names else None
-                # Create task without key - key will be added by the worker
-                shared_task_queue.put((year, var, None, dataset, None, var_short_name, skip_existing))
+                # Create task with custom_request parameter
+                shared_task_queue.put((year, var, None, dataset, None, var_short_name, skip_existing, custom_request))
         
         logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
         
