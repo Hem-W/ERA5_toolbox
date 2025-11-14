@@ -60,8 +60,14 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 
 To download ERA5 data, modify the user specifications in the main section of `downloader_ERA5.py` and run:
 
-```
+```bash
 python -u downloader_ERA5.py
+```
+
+Or run in the background to avoid interruption when closing the terminal:
+
+```bash
+nohup python -u downloader_ERA5.py &
 ```
 
 ### Configuration Parameters
