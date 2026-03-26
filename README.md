@@ -5,8 +5,8 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 ## Features
 
 - Dynamic task assignment system that automatically balances workload among multiple API keys
-  - Each API key can run multiple worker threads simultaneously (Two workers per API key is recommended by default, as one for active downloading and the other one for queueing on the server side.)
-  - Dynamic task submission for worker threads based on progress
+  - Each API key runs a dedicated request pipeline: one sequential request thread (submitting the next retrieve() as soon as the previous result is ready) plus a configurable number of parallel download threads
+  - This ensures the CDS server queue is always occupied while downloading proceeds concurrently
 - Robust download mechanism:
   - Automatic fallback download if the CDS API method fails
   - Exponential backoff retry strategy for failed downloads
@@ -81,7 +81,7 @@ variables = ["10m_u_component_of_wind", "2m_temperature"]
 dataset = "reanalysis-era5-single-levels"
 pressure_levels = None  # List of pressure levels (hPa)
 api_keys_file = None  # Use default 'cdsapi_keys.json'
-workers_per_key = 2  # Number of concurrent downloads per API key
+download_workers = 1  # Number of parallel download threads per key
 skip_existing = True  # Whether to skip downloading existing files
 
 # Optional: Provide short names for variables (recommended when skip_existing=True)
