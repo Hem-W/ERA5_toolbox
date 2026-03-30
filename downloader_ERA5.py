@@ -24,7 +24,7 @@ import json5
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.3.0.dev"
+__version__ = "0.3.1.dev"
 
 # Get current time for log file name
 current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -328,13 +328,17 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
         return False
 
 
-def key_request_thread(key, task_queue, results_queue, num_download_workers, worker_id):
+def key_request_thread(key, task_queue, results_queue, worker_id):
     """
-    Sequential request thread for one API key.
+    Request thread for one API key.
 
-    Submits one retrieve() at a time (the CDS server queues one job per key anyway).
-    As soon as a result is ready, pushes it to results_queue so the download thread
-    can start immediately while this thread submits the next request.
+    Submits one retrieve() at a time per thread. Multiple instances of this
+    function can run concurrently for the same key (each with its own fresh
+    cdsapi.Client) to keep several requests queued on the server side.
+
+    Does NOT send sentinels — start_key_workers() manages that via a supervisor
+    thread that waits for all request threads to finish before signalling the
+    download pool.
 
     Each task gets a fresh cdsapi.Client because Client.last_state is an instance
     variable — reusing a client across tasks would cause state corruption.
@@ -360,9 +364,6 @@ def key_request_thread(key, task_queue, results_queue, num_download_workers, wor
             results_queue.put(outcome)
         task_queue.task_done()
 
-    # Signal each download worker to exit
-    for _ in range(num_download_workers):
-        results_queue.put(None)
     logger.info(f"Request thread {worker_id} finished")
 
 
@@ -386,23 +387,28 @@ def key_download_thread(results_queue, worker_id):
     logger.info(f"Download thread {worker_id} finished")
 
 
-def start_key_workers(key, shared_task_queue, download_workers=1):
+def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_requests=1):
     """
     Start the request pipeline and download pool for a single API key.
 
     Architecture per key:
-    - 1 request thread (sequential): submits one retrieve() at a time, pushes results
-      to a per-key queue as soon as the server is done
-    - download_workers download threads: each blocks on the results queue and downloads
-      concurrently with the request thread's next submission
+    - concurrent_requests request threads: each submits one retrieve() at a time
+      (each with its own fresh cdsapi.Client), pushing results to a per-key queue
+      as soon as the server is done. Multiple threads keep several requests queued
+      on the CDS server simultaneously.
+    - download_workers download threads: each blocks on the results queue and
+      downloads concurrently with ongoing request submissions.
+    - 1 supervisor thread: waits for all request threads to finish, then sends
+      the None sentinels that shut down the download pool.
 
     Args:
         key: CDS API key
         shared_task_queue: Shared task queue across all keys
-        download_workers: Number of parallel download threads (default 1)
+        download_workers: Number of parallel download threads per key (default 1)
+        concurrent_requests: Number of concurrent request threads per key (default 1)
 
     Returns:
-        list: All spawned threads (request thread + download threads)
+        list: All spawned threads (request threads + download threads + supervisor)
     """
     results_queue = queue.Queue()
     threads = []
@@ -415,13 +421,28 @@ def start_key_workers(key, shared_task_queue, download_workers=1):
         t.start()
         threads.append(t)
 
-    # Single sequential request thread
-    req = threading.Thread(target=key_request_thread,
-                           args=(key, shared_task_queue, results_queue,
-                                 download_workers, f"{key[:4]}:req"))
-    req.daemon = True
-    req.start()
-    threads.append(req)
+    # Start concurrent request threads
+    req_threads = []
+    for i in range(concurrent_requests):
+        req = threading.Thread(target=key_request_thread,
+                               args=(key, shared_task_queue, results_queue,
+                                     f"{key[:4]}:req{i}"))
+        req.daemon = True
+        req.start()
+        req_threads.append(req)
+        threads.append(req)
+
+    # Supervisor: sends sentinels to the download pool once all request threads finish
+    def _sentinel_supervisor():
+        for t in req_threads:
+            t.join()
+        for _ in range(download_workers):
+            results_queue.put(None)
+        logger.info(f"Key {key[:4]}: all request threads done, download pool signalled")
+
+    sup = threading.Thread(target=_sentinel_supervisor, daemon=True)
+    sup.start()
+    threads.append(sup)
 
     return threads
 
@@ -482,14 +503,17 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(2017, 2020)
+    years = range(1980, 1992)
     variables = ['surface_pressure']
     dataset = "reanalysis-era5-single-levels"
     pressure_levels = None  # List of pressure levels (hPa)
     api_keys_file = None  # Use default 'cdsapi_keys.json'
+    # Number of concurrent request threads per key.
+    # Each thread submits one retrieve() at a time with its own fresh cdsapi.Client,
+    # so N threads keep N requests queued on the CDS server simultaneously.
+    # Note: CDS typically runs 1 request at a time per key but allows several queued.
+    concurrent_requests = 4
     # Number of parallel download threads per key.
-    # The request submission is always sequential (1 retrieve() at a time per key),
-    # so this only controls how many downloads run concurrently per key.
     download_workers = 1
     skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
     # Optional: Provide short names for variables.
@@ -519,6 +543,7 @@ if __name__ == '__main__':
     if pressure_levels:
         logger.info(f"Pressure Levels: {', '.join(str(p) for p in pressure_levels)} hPa")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
+    logger.info(f"Concurrent requests per key: {concurrent_requests}")
     logger.info(f"Download workers per key: {download_workers}")
     logger.info(f"Skip existing files: {skip_existing}")
     if short_names:
@@ -550,7 +575,7 @@ if __name__ == '__main__':
         # Start pipeline (request thread + download pool) for each key
         all_threads = []
         for key in cdsapi_keys:
-            key_threads = start_key_workers(key, shared_task_queue, download_workers)
+            key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests)
             all_threads.extend(key_threads)
 
         # Wait for all threads to complete
