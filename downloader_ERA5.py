@@ -24,23 +24,58 @@ import json5
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.3.1.dev"
+__version__ = "0.3.2.dev"
 
-# Get current time for log file name
-current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = f"era5_download_{current_time}.log"
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(log_filename),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
-logger.info(f"ERA5 Downloader Version: {__version__}")
+
+def validate_key(key, url):
+    """
+    Validate a CDS API key before starting the task loop.
+
+    cdsapi routes keys to one of two client implementations depending on format:
+    - Key WITH colon (UID:APIKEY) → cdsapi.Client, uses HTTP Basic Auth,
+      POST to {url}/resources/{dataset}
+    - Key WITHOUT colon (UUID token) → ecmwf.datastores.LegacyClient, uses
+      PRIVATE-TOKEN header, POST to {url}/retrieve/v1/processes/{dataset}/execution
+
+    Step 1 (local): cdsapi.Client.__init__ validates key format and auth setup.
+    Step 2 (network): calls the appropriate authenticated endpoint for each client type.
+
+    Returns:
+        (True, None) if the key is valid.
+        (False, error_message) if the key is invalid, with the original error message.
+    """
+    # Step 1: local format check — no network call
+    try:
+        client = cdsapi.Client(url=url, key=key, quiet=True)
+    except AssertionError as e:
+        return False, f"Malformed key format: {e}"
+    except Exception as e:
+        return False, f"Client init error: {e}"
+
+    # Step 2: network check, branching on client type.
+    try:
+        if hasattr(client, 'client') and hasattr(client.client, 'check_authentication'):
+            # LegacyClient (key without colon): uses PRIVATE-TOKEN header internally.
+            # check_authentication() calls POST {url}/profiles/v1/account/verification/pat
+            # and raises requests.HTTPError for invalid tokens.
+            client.client.check_authentication()
+        else:
+            # Old-style Client (key with colon): uses HTTP Basic Auth via session.auth.
+            # POST to /resources/ with an empty body — server validates credentials before
+            # the request body, so a bad key returns 401/403 and a good key returns 400/422.
+            resp = client.session.post(
+                f"{url}/resources/reanalysis-era5-single-levels",
+                json={},
+                verify=client.verify,
+                timeout=client.timeout,
+            )
+            if resp.status_code in (401, 403):
+                return False, f"HTTP {resp.status_code} {resp.reason}: {resp.text.strip()}"
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
 
 def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
     """
@@ -446,6 +481,44 @@ def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_req
 
     return threads
 
+def filter_valid_keys(keys, url="https://cds.climate.copernicus.eu/api"):
+    """
+    Validate each key and return only those that pass the pre-flight check.
+
+    Logs an error for every invalid key (with the original server message) and
+    raises RuntimeError if no valid keys remain.
+
+    Args:
+        keys: List of CDS API key strings.
+        url: CDS API base URL.
+
+    Returns:
+        list: Keys that passed validation.
+
+    Raises:
+        RuntimeError: If all keys are invalid.
+    """
+    logger.info(f"Validating {len(keys)} API key(s)...")
+    valid = []
+    for key in keys:
+        ok, err = validate_key(key, url)
+        if ok:
+            valid.append(key)
+            logger.info(f"Key {key[:4]}...: valid")
+        else:
+            logger.error(f"Key {key[:4]}...: invalid — {err}")
+
+    if not valid:
+        raise RuntimeError("No valid API keys found. Please check your keys and licence agreements.")
+
+    if len(valid) < len(keys):
+        logger.warning(
+            f"{len(keys) - len(valid)} key(s) removed; "
+            f"proceeding with {len(valid)} valid key(s)"
+        )
+    return valid
+
+
 def load_api_keys(keys_file='cdsapi_keys.json'):
     """Load API keys from a JSON file using JSON5 parser (supports comments)
 
@@ -503,7 +576,7 @@ if __name__ == '__main__':
     ####################
     # User Specification
     ####################
-    years = range(1980, 1992)
+    years = range(2018, 2020)
     variables = ['surface_pressure']
     dataset = "reanalysis-era5-single-levels"
     pressure_levels = None  # List of pressure levels (hPa)
@@ -524,8 +597,25 @@ if __name__ == '__main__':
     ####################
     # Program
     ####################
-    # Load API keys from JSON file
-    cdsapi_keys = load_api_keys(api_keys_file)
+    # Configure logging (here so the Manager child process does not re-run this)
+    current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"era5_download_{current_time}.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_filename),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    logger.info(f"ERA5 Downloader Version: {__version__}")
+
+    # Load API keys from JSON file and validate each one
+    try:
+        cdsapi_keys = filter_valid_keys(load_api_keys(api_keys_file))
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
     # Validate configuration
     if skip_existing and not short_names:
         logger.warning("skip_existing is True but no short_names provided. This may cause files to be re-downloaded.")
