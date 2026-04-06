@@ -267,31 +267,28 @@ def main():
     log_level = getattr(logging, args.log_level)
     logger = setup_logging(log_level=log_level, log_dir=args.log_dir)
     
-    # Setup dask client once
-    logger.info(f"Initializing dask client with {args.workers} workers and {args.threads} threads per worker")
-    client = dask.distributed.Client(n_workers=args.workers, threads_per_worker=args.threads)
-    
     try:
         # Process each year
         for year in args.years:
-            process_year(
-                year,
-                variable=args.variable,
-                input_dir=args.input_dir,
-                output_dir=args.output_dir,
-                chunk_size=args.chunk_size,
-                client=client,
-                method=args.method,
-                time_shift_hours=args.time_shift_hours
-            )
+            # Setup dask client for each year to avoid resource accumulation/leakage
+            logger.info(f"Initializing dask client for year {year} with {args.workers} workers and {args.threads} threads per worker")
+            # Use a context manager to ensure the client is properly closed after each year
+            with dask.distributed.Client(n_workers=args.workers, threads_per_worker=args.threads) as client:
+                process_year(
+                    year,
+                    variable=args.variable,
+                    input_dir=args.input_dir,
+                    output_dir=args.output_dir,
+                    chunk_size=args.chunk_size,
+                    client=client,
+                    method=args.method,
+                    time_shift_hours=args.time_shift_hours
+                )
+                
         logger.info("All years processed successfully")
     except Exception as e:
         logger.exception(f"Error during processing: {str(e)}")
         # Don't re-raise the exception to allow cleanup to happen
-    finally:
-        # Ensure client is closed even if an error occurs
-        logger.info("Closing dask client")
-        client.close()
     
     return args
 
