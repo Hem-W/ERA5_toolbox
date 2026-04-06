@@ -1,0 +1,41 @@
+# ERA5 Download Configuration
+# Copy this file and customize for your needs.
+# Usage: python -u downloader_ERA5.py --file <this_file.yaml>
+
+# Year range to download (both start and stop are inclusive)
+years:
+  start: 2018
+  stop: 2020
+# OR list individual years:
+# years: [2018, 2019, 2020]
+
+# Variables to download (CDS API names)
+variables:
+  - surface_pressure
+
+# Dataset name
+# Options: reanalysis-era5-single-levels, reanalysis-era5-pressure-levels
+dataset: reanalysis-era5-single-levels
+
+# Pressure levels in hPa (only for reanalysis-era5-pressure-levels)
+# pressure_levels: [500, 850]
+pressure_levels: null
+
+# Path to API keys JSON file (null = default 'cdsapi_keys.json')
+api_keys_file: null
+
+# Number of concurrent request threads per key
+# Each thread submits one retrieve() at a time, so N threads keep
+# N requests queued on the CDS server simultaneously.
+concurrent_requests: 4
+
+# Number of parallel download threads per key
+download_workers: 1
+
+# Whether to skip downloading existing files (requires short_names)
+skip_existing: true
+
+# Map of API variable name to short name for filenames
+# Recommended when skip_existing is true
+short_names:
+  surface_pressure: sp

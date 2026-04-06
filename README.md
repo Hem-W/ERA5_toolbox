@@ -59,21 +59,33 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 
 ## Usage
 
-To download ERA5 data, modify the user specifications in the main section of `downloader_ERA5.py` and run:
+### Option 1: YAML Configuration File (Recommended)
+
+Create a YAML configuration file based on `template_request.yaml` and run:
+
+```bash
+python -u downloader_ERA5.py --file my_config.yaml
+```
+
+Or run in the background:
+
+```bash
+nohup python -u downloader_ERA5.py --file my_config.yaml &
+```
+
+See `template_request.yaml` for a commented example with all available parameters.
+
+### Option 2: Hardcoded Defaults (Fallback)
+
+If no `--file` is provided, the script falls back to the hardcoded defaults in the main section of `downloader_ERA5.py`:
 
 ```bash
 python -u downloader_ERA5.py
 ```
 
-Or run in the background to avoid interruption when closing the terminal:
-
-```bash
-nohup python -u downloader_ERA5.py &
-```
-
 ### Configuration Parameters
 
-Edit these parameters in the main section of the script:
+The following parameters can be set via the YAML file or by editing the hardcoded defaults in the script:
 
 ```python
 # User Specification

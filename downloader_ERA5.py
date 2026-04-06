@@ -21,10 +21,12 @@ import sys
 from tqdm import tqdm
 import urllib3
 import json5
+import yaml
+import argparse
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.3.2"
+__version__ = "0.4.0.dev"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -572,27 +574,138 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
         logger.error(f"Error loading API keys from {keys_file}: {str(e)}")
         raise RuntimeError(f"Error loading API keys from {keys_file}: {str(e)}")
 
+def load_config_from_yaml(yaml_path):
+    """
+    Load download configuration from a YAML file.
+
+    Args:
+        yaml_path: Path to the YAML configuration file.
+
+    Returns:
+        dict: Validated configuration with keys:
+            years, variables, dataset, pressure_levels, api_keys_file,
+            concurrent_requests, download_workers, skip_existing, short_names.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        ValueError: If required fields are missing or have invalid types.
+    """
+    yaml_path = pathlib.Path(yaml_path)
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {yaml_path}")
+
+    with open(yaml_path, 'r') as f:
+        raw = yaml.safe_load(f)
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected a YAML mapping at the top level, got {type(raw).__name__}")
+
+    # --- years (required) ---
+    if 'years' not in raw:
+        raise ValueError("'years' is required in the YAML configuration")
+    years_raw = raw['years']
+    if isinstance(years_raw, dict):
+        if 'start' not in years_raw or 'stop' not in years_raw:
+            raise ValueError("'years' mapping must contain 'start' and 'stop' keys")
+        start = int(years_raw['start'])
+        stop = int(years_raw['stop'])
+        if start > stop:
+            raise ValueError(f"'years.start' ({start}) must be <= 'years.stop' ({stop})")
+        years = range(start, stop + 1)  # inclusive on both ends
+    elif isinstance(years_raw, list):
+        years = [int(y) for y in years_raw]
+    else:
+        raise ValueError(f"'years' must be a list or a mapping with start/stop, got {type(years_raw).__name__}")
+
+    # --- variables (required) ---
+    if 'variables' not in raw:
+        raise ValueError("'variables' is required in the YAML configuration")
+    variables = raw['variables']
+    if isinstance(variables, str):
+        variables = [variables]
+    if not isinstance(variables, list) or not all(isinstance(v, str) for v in variables):
+        raise ValueError("'variables' must be a string or list of strings")
+
+    # --- optional fields with defaults ---
+    dataset = raw.get('dataset', 'reanalysis-era5-single-levels')
+    pressure_levels = raw.get('pressure_levels', None)
+    api_keys_file = raw.get('api_keys_file', None)
+    concurrent_requests = int(raw.get('concurrent_requests', 4))
+    download_workers = int(raw.get('download_workers', 1))
+    skip_existing = bool(raw.get('skip_existing', True))
+    short_names = raw.get('short_names', None)
+
+    if short_names is not None and not isinstance(short_names, dict):
+        raise ValueError("'short_names' must be a mapping of variable name to short name")
+
+    return {
+        'years': years,
+        'variables': variables,
+        'dataset': dataset,
+        'pressure_levels': pressure_levels,
+        'api_keys_file': api_keys_file,
+        'concurrent_requests': concurrent_requests,
+        'download_workers': download_workers,
+        'skip_existing': skip_existing,
+        'short_names': short_names,
+    }
+
+
 if __name__ == '__main__':
     ####################
-    # User Specification
+    # CLI Interface
     ####################
-    years = range(2018, 2020)
-    variables = ['surface_pressure']
-    dataset = "reanalysis-era5-single-levels"
-    pressure_levels = None  # List of pressure levels (hPa)
-    api_keys_file = None  # Use default 'cdsapi_keys.json'
-    # Number of concurrent request threads per key.
-    # Each thread submits one retrieve() at a time with its own fresh cdsapi.Client,
-    # so N threads keep N requests queued on the CDS server simultaneously.
-    # Note: CDS typically runs 1 request at a time per key but allows several queued.
-    concurrent_requests = 4
-    # Number of parallel download threads per key.
-    download_workers = 1
-    skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
-    # Optional: Provide short names for variables.
-    # If skip_existing=True, short_names MUST be provided for reliable operation.
-    # Example: short_names = {'convective_available_potential_energy': 'cape'}
-    short_names = {'surface_pressure': 'sp'}
+    parser = argparse.ArgumentParser(
+        description="Download ERA5 data from CDS API",
+        epilog="See template_request.yaml for an example YAML configuration file.",
+    )
+    parser.add_argument(
+        '-f', '--file',
+        type=str,
+        default=None,
+        help="Path to a YAML configuration file. If omitted, hardcoded defaults below are used.",
+    )
+    args = parser.parse_args()
+
+    if args.file is not None:
+        # Load configuration from YAML file
+        try:
+            config = load_config_from_yaml(args.file)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error loading config: {e}", file=sys.stderr)
+            sys.exit(1)
+        config_source = args.file
+        years             = config['years']
+        variables         = config['variables']
+        dataset           = config['dataset']
+        pressure_levels   = config['pressure_levels']
+        api_keys_file     = config['api_keys_file']
+        concurrent_requests = config['concurrent_requests']
+        download_workers  = config['download_workers']
+        skip_existing     = config['skip_existing']
+        short_names       = config['short_names']
+    else:
+        ####################
+        # Hardcoded Defaults (fallback when no --file is provided)
+        ####################
+        config_source = "hardcoded defaults"
+        years = range(2018, 2020)
+        variables = ['surface_pressure']
+        dataset = "reanalysis-era5-single-levels"
+        pressure_levels = None  # List of pressure levels (hPa)
+        api_keys_file = None  # Use default 'cdsapi_keys.json'
+        # Number of concurrent request threads per key.
+        # Each thread submits one retrieve() at a time with its own fresh cdsapi.Client,
+        # so N threads keep N requests queued on the CDS server simultaneously.
+        # Note: CDS typically runs 1 request at a time per key but allows several queued.
+        concurrent_requests = 4
+        # Number of parallel download threads per key.
+        download_workers = 1
+        skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)
+        # Optional: Provide short names for variables.
+        # If skip_existing=True, short_names MUST be provided for reliable operation.
+        # Example: short_names = {'convective_available_potential_energy': 'cape'}
+        short_names = {'surface_pressure': 'sp'}
 
     ####################
     # Program
@@ -609,6 +722,7 @@ if __name__ == '__main__':
         ]
     )
     logger.info(f"ERA5 Downloader Version: {__version__}")
+    logger.info(f"Configuration source: {config_source}")
 
     # Load API keys from JSON file and validate each one
     try:
@@ -623,7 +737,10 @@ if __name__ == '__main__':
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
     logger.info("=== ERA5 Download Configuration ===")
-    logger.info(f"Years: {years.start} to {years.stop-1}")
+    if isinstance(years, range):
+        logger.info(f"Years: {years.start} to {years.stop - 1} ({len(years)} years)")
+    else:
+        logger.info(f"Years: {years} ({len(years)} years)")
     # Convert single variable string to list, or keep as list if already a list
     variables = [variables] if isinstance(variables, str) else variables
     logger.info(f"Variables: {', '.join(variables)}")

@@ -22,3 +22,9 @@ notebooks/check_*.ipynb
 
 # Template
 template/
+
+# YAML config files (keep only the template)
+*.yaml
+*.yml
+!template_request.yaml
+!template_request.yml
