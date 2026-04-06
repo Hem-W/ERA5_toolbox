@@ -24,7 +24,7 @@ import json5
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.3.2.dev"
+__version__ = "0.3.2"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
