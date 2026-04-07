@@ -75,9 +75,9 @@ nohup python -u downloader_ERA5.py --file my_config.yaml &
 
 See `template_request.yaml` for a commented example with all available parameters.
 
-### Option 2: Hardcoded Defaults (Fallback)
+### Option 2: Hardcoded in Script
 
-If no `--file` is provided, the script falls back to the hardcoded defaults in the main section of `downloader_ERA5.py`:
+If no `--file` is provided, the script uses the hardcoded configuration in the main section of `downloader_ERA5.py`:
 
 ```bash
 python -u downloader_ERA5.py
@@ -85,7 +85,7 @@ python -u downloader_ERA5.py
 
 ### Configuration Parameters
 
-The following parameters can be set via the YAML file or by editing the hardcoded defaults in the script:
+The following parameters can be set via the YAML file or by editing the hardcoded configuration in the script:
 
 ```python
 # User Specification
@@ -152,3 +152,8 @@ The variable short name can be:
 The script loads API keys from a separate JSON file, which:
 - Keeps sensitive credentials out of source code
 - Makes it easier to maintain and update keys
+
+## Experimental Helper Utilities
+
+- Resampling ERA5 data: `utils/resampler_ERA5.py`
+- Calculate relative humidity from temperature and specific humidity: `utils/humid-helper_ERA5.py`
