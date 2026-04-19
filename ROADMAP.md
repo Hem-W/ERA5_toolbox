@@ -11,13 +11,14 @@ This document outlines the planned future development for the ERA5 Toolbox.
 - [x] Add CLI interface
     - [x] Add yaml template for input parameters
     - [ ] Improve logging launch logic
+    - [ ] Add name pattern option
+    - [ ] Add folder structure pattern option
 - [ ] Add support for ERA5-Land datasets
 - [ ] Add summary report for fast reviews after downloads
 
 ## Long-term Vision
 
 - [ ] Add option to download specific geographic regions
-- [ ] Add command-line arguments for easier configuration
 - [ ] Implement automatic data validation and quality checks
 - [ ] Distribute clients to different machines
 
@@ -30,6 +31,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 
 - Implement time period subsetting (specific months/days)
 - Improve test coverage and add automated testing (for techinical)
+- Add command-line arguments for easier configuration
 
 ## How to Contribute
 

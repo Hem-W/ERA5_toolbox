@@ -26,7 +26,7 @@ import argparse
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.4.0.dev"
+__version__ = "0.4.1"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -790,5 +790,5 @@ if __name__ == '__main__':
             t.join()
 
     # Calculate elapsed time
-    elapsed_time = time.time() - start_time
-    logger.info(f"All download processes completed in {time.strftime('%H:%M:%S', time.gmtime(elapsed_time))}")
+    _td = datetime.timedelta(seconds=int(time.time() - start_time))
+    logger.info(f"All dataset requests and downloads completed in {_td.days:02d}d{_td.seconds//3600:02d}h{_td.seconds%3600//60:02d}m")
