@@ -14,7 +14,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
     - [ ] Add name pattern option
     - [ ] Add folder structure pattern option
 - [ ] Add support for ERA5-Land datasets
-- [ ] Add summary report for fast reviews after downloads
+- [x] Add summary report for fast reviews after downloads
 
 ## Long-term Vision
 

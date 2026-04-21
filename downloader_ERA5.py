@@ -26,9 +26,85 @@ import argparse
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
+
+
+class ReportCollector:
+    """
+    Thread-safe collector for per-task outcomes across the download pipeline.
+
+    Each entry is a dict with keys:
+        year, variable, dataset, pressure_level,
+        status:  'success' | 'skipped' | 'failed'
+        stage:   None                      (for success/skipped)
+                 'request'                 (retrieve() raised)
+                 'default_download'        (cdsapi download failed, no fallback URL)
+                 'fallback_download'       (all urllib3 attempts failed)
+        via:     'cdsapi' | 'urllib3'      (only set on success, else None)
+        error:   str | None                (error message on failure)
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.entries = []
+
+    def add(self, year, variable, dataset, pressure_level,
+            status, stage=None, via=None, error=None):
+        entry = {
+            'year': year,
+            'variable': variable,
+            'dataset': dataset,
+            'pressure_level': pressure_level,
+            'status': status,
+            'stage': stage,
+            'via': via,
+            'error': error,
+        }
+        with self._lock:
+            self.entries.append(entry)
+
+    def _task_label(self, e):
+        pl = f" @{e['pressure_level']}hPa" if e['pressure_level'] else ""
+        return f"{e['variable']}{pl} {e['year']}"
+
+    def print_summary(self, log=None):
+        """Print a human-readable summary via `log` (defaults to module logger)."""
+        out = log or logger
+        with self._lock:
+            entries = list(self.entries)
+
+        successes = [e for e in entries if e['status'] == 'success']
+        skipped   = [e for e in entries if e['status'] == 'skipped']
+        failures  = [e for e in entries if e['status'] == 'failed']
+
+        out.info("=" * 60)
+        out.info("=== ERA5 Download Summary Report ===")
+        out.info(f"Total tasks processed: {len(entries)}")
+        out.info(f"  Successful downloads: {len(successes)}")
+        if successes:
+            via_cdsapi  = sum(1 for e in successes if e['via'] == 'cdsapi')
+            via_urllib3 = sum(1 for e in successes if e['via'] == 'urllib3')
+            out.info(f"    via cdsapi:  {via_cdsapi}")
+            out.info(f"    via urllib3 fallback: {via_urllib3}")
+        out.info(f"  Skipped (already existed): {len(skipped)}")
+        out.info(f"  Failed: {len(failures)}")
+
+        if failures:
+            # Group by stage for quick scanning
+            by_stage = {}
+            for e in failures:
+                by_stage.setdefault(e['stage'] or 'unknown', []).append(e)
+            out.info("--- Failures by stage ---")
+            for stage, items in by_stage.items():
+                out.info(f"  failed at {stage}: {len(items)}")
+
+            out.info("--- Failed requests (detail) ---")
+            for e in failures:
+                msg = (e['error'] or '').strip().splitlines()
+                short = msg[0] if msg else ''
+                out.info(f"  [{e['stage']}] {self._task_label(e)} :: {short}")
+        out.info("=" * 60)
 
 def validate_key(key, url):
     """
@@ -206,7 +282,7 @@ def get_variable_code_from_netcdf(nc_file, api_variable):
         return api_variable
 
 
-def submit_request(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None):
+def submit_request(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None, report=None):
     """
     Submit a request to the CDS API and wait for the server to process it.
 
@@ -266,6 +342,9 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
 
             if os.path.exists(file_pattern):
                 logger.info(f"{log_prefix}Skip existing file {file_pattern} for variable {variable}")
+                if report is not None:
+                    report.add(year, variable, dataset, pressure_level,
+                               status='skipped')
                 return None
 
     logger.info(f"{log_prefix}Requesting {target}")
@@ -277,10 +356,13 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
     except Exception as e:
         logger.error(f"{log_prefix}Request failed for {target}: {str(e)}")
         logger.error(traceback.format_exc())
+        if report is not None:
+            report.add(year, variable, dataset, pressure_level,
+                       status='failed', stage='request', error=str(e))
         return None
 
 
-def perform_download(result, target, year, variable, dataset, pressure_level, short_name, worker_id=None):
+def perform_download(result, target, year, variable, dataset, pressure_level, short_name, worker_id=None, report=None):
     """
     Download a prepared CDS result to disk.
 
@@ -302,11 +384,16 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
     """
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
 
+    # Tracks which stage/path we ended up on, for the summary report.
+    download_via = None        # 'cdsapi' | 'urllib3' on success
+    failure_stage = None       # 'default_download' | 'fallback_download' on failure
+
     try:
         try:
             # Download method 1: cdsapi built-in
             result.download(target)
             logger.info(f"{log_prefix}Successfully downloaded {target} via cdsapi")
+            download_via = 'cdsapi'
         except Exception as e:
             logger.error(f"{log_prefix}Standard download failed for {target}: {str(e)}")
             logger.error(traceback.format_exc())
@@ -325,6 +412,7 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
 
                     if download_file_with_urllib3(download_url, target):
                         logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
+                        download_via = 'urllib3'
                         break
 
                     if attempt < 3:
@@ -333,8 +421,10 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
                         time.sleep(wait_time)
                 else:
                     logger.error(f"{log_prefix}All download attempts failed for {target} using urllib3")
+                    failure_stage = 'fallback_download'
                     raise RuntimeError(f"All urllib3 download attempts failed for {target}")
             else:
+                failure_stage = 'default_download'
                 raise
 
         # Rename the file when short_name was not provided (auto-detect from NetCDF)
@@ -354,6 +444,9 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
                     os.rename(target, final_target)
                     logger.info(f"{log_prefix}Renamed {target} to {final_target}")
 
+        if report is not None:
+            report.add(year, variable, dataset, pressure_level,
+                       status='success', via=download_via)
         return True
 
     except Exception as e:
@@ -362,10 +455,15 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
         if os.path.exists(target):
             logger.info(f"{log_prefix}Removing broken file {target}")
             os.remove(target)
+        if report is not None:
+            report.add(year, variable, dataset, pressure_level,
+                       status='failed',
+                       stage=failure_stage or 'default_download',
+                       error=str(e))
         return False
 
 
-def key_request_thread(key, task_queue, results_queue, worker_id):
+def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
     """
     Request thread for one API key.
 
@@ -396,7 +494,8 @@ def key_request_thread(key, task_queue, results_queue, worker_id):
         year, variable, _, dataset, pressure_level, short_name, skip_existing = task
         client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
         outcome = submit_request(client, year, variable, dataset,
-                                 pressure_level, skip_existing, worker_id, short_name)
+                                 pressure_level, skip_existing, worker_id, short_name,
+                                 report=report)
         if outcome is not None:
             results_queue.put(outcome)
         task_queue.task_done()
@@ -404,7 +503,7 @@ def key_request_thread(key, task_queue, results_queue, worker_id):
     logger.info(f"Request thread {worker_id} finished")
 
 
-def key_download_thread(results_queue, worker_id):
+def key_download_thread(results_queue, worker_id, report=None):
     """
     Download thread that consumes ready results from the request thread.
 
@@ -420,11 +519,12 @@ def key_download_thread(results_queue, worker_id):
             break
         result, target, year, variable, dataset, pressure_level, short_name = item
         perform_download(result, target, year, variable, dataset,
-                         pressure_level, short_name, worker_id)
+                         pressure_level, short_name, worker_id,
+                         report=report)
     logger.info(f"Download thread {worker_id} finished")
 
 
-def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_requests=1):
+def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_requests=1, report=None):
     """
     Start the request pipeline and download pool for a single API key.
 
@@ -453,7 +553,7 @@ def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_req
     # Start download pool first so it is ready before the first result arrives
     for i in range(download_workers):
         t = threading.Thread(target=key_download_thread,
-                             args=(results_queue, f"{key[:4]}:dl{i}"))
+                             args=(results_queue, f"{key[:4]}:dl{i}", report))
         t.daemon = True
         t.start()
         threads.append(t)
@@ -463,7 +563,7 @@ def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_req
     for i in range(concurrent_requests):
         req = threading.Thread(target=key_request_thread,
                                args=(key, shared_task_queue, results_queue,
-                                     f"{key[:4]}:req{i}"))
+                                     f"{key[:4]}:req{i}", report))
         req.daemon = True
         req.start()
         req_threads.append(req)
@@ -762,6 +862,9 @@ if __name__ == '__main__':
     # Track start time
     start_time = time.time()
 
+    # Collect per-task outcomes from every worker thread for the final summary
+    report = ReportCollector()
+
     # Create a Manager for sharing resources across processes
     with Manager() as manager:
         # Create a shared task queue
@@ -782,7 +885,7 @@ if __name__ == '__main__':
         # Start pipeline (request thread + download pool) for each key
         all_threads = []
         for key in cdsapi_keys:
-            key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests)
+            key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests, report=report)
             all_threads.extend(key_threads)
 
         # Wait for all threads to complete
@@ -792,3 +895,6 @@ if __name__ == '__main__':
     # Calculate elapsed time
     _td = datetime.timedelta(seconds=int(time.time() - start_time))
     logger.info(f"All dataset requests and downloads completed in {_td.days:02d}d{_td.seconds//3600:02d}h{_td.seconds%3600//60:02d}m")
+
+    # Final summary report
+    report.print_summary()
