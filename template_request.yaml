@@ -39,3 +39,21 @@ skip_existing: true
 # Recommended when skip_existing is true
 short_names:
   surface_pressure: sp
+
+# Output path patterns (optional)
+# Supported placeholders in both folder_pattern and name_pattern:
+#   {short_name}     - variable short name (falls back to the API variable
+#                      name when no short_name is set for the variable)
+#   {variable}       - API variable name (e.g. surface_pressure)
+#   {year}           - year being downloaded
+#   {pressure_level} - pressure level in hPa (empty for single-level dataset)
+#   {dataset}        - CDS dataset name
+#
+# Defaults (applied when a pattern is omitted):
+#   folder_pattern: hour/{short_name}
+#   name_pattern (single-level):
+#     era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc
+#   name_pattern (pressure-level):
+#     era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc
+# folder_pattern: hour/{short_name}
+# name_pattern: era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc

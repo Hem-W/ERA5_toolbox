@@ -137,13 +137,27 @@ short_names = {
 }
 ```
 
-## Output File Naming Pattern
+## Output Path Layout
 
-Output files are named with a prescribed pattern:
-- Single-level: `era5.reanalysis.[variable_shortname].1hr.0p25deg.global.[year].nc`
-- Pressure-level: `era5.reanalysis.[variable_shortname].[pressure_level]hpa.1hr.0p25deg.global.[year].nc`
+Downloaded files are written to `<folder_pattern>/<name_pattern>`, both of
+which are configurable via the YAML file (`folder_pattern`, `name_pattern`).
+Placeholders available in either pattern:
+
+- `{short_name}` — variable short name (falls back to the API `{variable}`
+  name when no entry is provided in `short_names`)
+- `{variable}` — CDS API variable name (e.g. `surface_pressure`)
+- `{year}` — year being downloaded
+- `{pressure_level}` — pressure level in hPa (empty for single-level data)
+- `{dataset}` — CDS dataset name
+
+When a pattern is omitted, dataset-aware defaults are used:
+
+- `folder_pattern`: `hour/{short_name}`
+- `name_pattern` (single-level): `era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc`
+- `name_pattern` (pressure-level): `era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc`
 
 The variable short name can be:
+
 1. Provided by the user via the `short_names` dictionary (recommended)
 2. Automatically extracted from the downloaded NetCDF file (when `short_name` is not provided)
 

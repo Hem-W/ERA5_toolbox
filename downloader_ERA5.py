@@ -26,7 +26,7 @@ import argparse
 import xarray as xr  # Added for robust NetCDF variable extraction
 
 # Script version
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -282,7 +282,80 @@ def get_variable_code_from_netcdf(nc_file, api_variable):
         return api_variable
 
 
-def submit_request(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None, report=None):
+def default_folder_pattern(dataset):
+    """Return the default folder pattern for the given dataset.
+
+    Defaults keep each variable in its own subdirectory under ``hour/`` so the
+    output tree mirrors the canonical ERA5 layout.
+    """
+    return "hour/{short_name}"
+
+
+def default_name_pattern(dataset):
+    """Return the default file-name pattern for the given dataset.
+
+    The pressure-level default includes ``{pressure_level}hpa`` so files from
+    different levels do not collide when they share a folder.
+    """
+    if dataset == "reanalysis-era5-pressure-levels":
+        return "era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
+    return "era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
+
+
+def default_path_pattern(dataset):
+    """Return the combined default output path pattern for the given dataset."""
+    return os.path.join(default_folder_pattern(dataset),
+                        default_name_pattern(dataset))
+
+
+def build_target_path(path_pattern, *, short_name, variable, year, dataset,
+                      pressure_level=None):
+    """Compose the full output path by substituting placeholders.
+
+    Supported placeholders:
+        {short_name}     — variable short name; falls back to the API
+                           ``variable`` name when ``short_name`` is None
+        {variable}       — API variable name (e.g. ``surface_pressure``)
+        {year}           — year as an integer/string
+        {pressure_level} — pressure level in hPa; empty string when the
+                           dataset has no pressure level
+        {dataset}        — CDS dataset name
+
+    Args:
+        path_pattern:   Full path pattern (folder and name combined).
+        short_name:     Short name for the variable, or None to fall back to
+                        the API variable name.
+        variable:       API variable name.
+        year:           Year being downloaded.
+        dataset:        CDS dataset name.
+        pressure_level: Pressure level in hPa, if applicable.
+
+    Returns:
+        str: Composed path.
+
+    Raises:
+        ValueError: If the pattern is empty or references an unknown placeholder.
+    """
+    if not path_pattern:
+        raise ValueError("path_pattern must be a non-empty string")
+
+    ctx = {
+        'short_name': short_name if short_name is not None else variable,
+        'variable': variable,
+        'year': year,
+        'dataset': dataset,
+        'pressure_level': '' if pressure_level is None else pressure_level,
+    }
+    try:
+        return path_pattern.format(**ctx)
+    except KeyError as e:
+        raise ValueError(
+            f"Unknown placeholder {e} in path_pattern; "
+            f"supported placeholders: {sorted(ctx.keys())}"
+        ) from e
+
+
+def submit_request(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None, report=None, path_pattern=None):
     """
     Submit a request to the CDS API and wait for the server to process it.
 
@@ -302,12 +375,19 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
         short_name: Optional short name for the variable used in the filename.
                     If None, the variable name is used initially and the file is
                     renamed after download based on the actual variable code.
+        path_pattern: Resolved output path pattern (folder + name combined).
+                      Required; the caller (``__main__``) is responsible for
+                      resolving dataset-aware defaults.
 
     Returns:
-        tuple: (result, target_path, year, variable, dataset, pressure_level, short_name)
+        tuple: (result, target_path, year, variable, dataset, pressure_level,
+                short_name, path_pattern)
                or None if the task was skipped or the request failed
     """
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
+
+    if path_pattern is None:
+        raise ValueError("path_pattern is required (resolve defaults at the top level)")
 
     request = {
         'product_type': ['reanalysis'],
@@ -320,28 +400,24 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
         "download_format": "unarchived"
     }
 
-    var_name_for_file = short_name if short_name is not None else variable
-
     if dataset == "reanalysis-era5-pressure-levels":
         if pressure_level is None:
             raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
         request["pressure_level"] = [pressure_level]
-        target = f"era5.reanalysis.{var_name_for_file}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
-    else:
-        target = f"era5.reanalysis.{var_name_for_file}.1hr.0p25deg.global.{year}.nc"
+
+    target = build_target_path(
+        path_pattern,
+        short_name=short_name, variable=variable,
+        year=year, dataset=dataset, pressure_level=pressure_level,
+    )
 
     # Check for existing files before submitting to avoid wasting a server slot
     if skip_existing:
         if short_name is None:
             logger.warning(f"{log_prefix}skip_existing is True but no short_name provided for {variable}. Cannot reliably check for existing files.")
         else:
-            if dataset == "reanalysis-era5-pressure-levels":
-                file_pattern = f"era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
-            else:
-                file_pattern = f"era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
-
-            if os.path.exists(file_pattern):
-                logger.info(f"{log_prefix}Skip existing file {file_pattern} for variable {variable}")
+            if os.path.exists(target):
+                logger.info(f"{log_prefix}Skip existing file {target} for variable {variable}")
                 if report is not None:
                     report.add(year, variable, dataset, pressure_level,
                                status='skipped')
@@ -352,7 +428,8 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
     try:
         result = client.retrieve(dataset, request)
         logger.info(f"{log_prefix}Request completed, result ready for {target}")
-        return (result, target, year, variable, dataset, pressure_level, short_name)
+        return (result, target, year, variable, dataset, pressure_level,
+                short_name, path_pattern)
     except Exception as e:
         logger.error(f"{log_prefix}Request failed for {target}: {str(e)}")
         logger.error(traceback.format_exc())
@@ -362,7 +439,9 @@ def submit_request(client, year, variable, dataset="reanalysis-era5-single-level
         return None
 
 
-def perform_download(result, target, year, variable, dataset, pressure_level, short_name, worker_id=None, report=None):
+def perform_download(result, target, year, variable, dataset, pressure_level,
+                     short_name, worker_id=None, report=None,
+                     path_pattern=None):
     """
     Download a prepared CDS result to disk.
 
@@ -378,11 +457,22 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
         pressure_level: Pressure level (used for rename logic)
         short_name: Short name used in the filename (None triggers auto-rename)
         worker_id: Optional identifier for log prefixes
+        path_pattern: Resolved output path pattern (used for rename logic).
+                      Required; the caller is responsible for resolving
+                      dataset-aware defaults.
 
     Returns:
         bool: True if download succeeded, False otherwise
     """
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
+
+    if path_pattern is None:
+        raise ValueError("path_pattern is required (resolve defaults at the top level)")
+
+    # Ensure the output directory exists before the downloader writes into it.
+    target_dir = os.path.dirname(target)
+    if target_dir:
+        os.makedirs(target_dir, exist_ok=True)
 
     # Tracks which stage/path we ended up on, for the summary report.
     download_via = None        # 'cdsapi' | 'urllib3' on success
@@ -431,16 +521,20 @@ def perform_download(result, target, year, variable, dataset, pressure_level, sh
         if short_name is None and os.path.exists(target):
             actual_var_code = get_variable_code_from_netcdf(target, variable)
 
-            if dataset == "reanalysis-era5-pressure-levels":
-                final_target = f"era5.reanalysis.{actual_var_code}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
-            else:
-                final_target = f"era5.reanalysis.{actual_var_code}.1hr.0p25deg.global.{year}.nc"
+            final_target = build_target_path(
+                path_pattern,
+                short_name=actual_var_code, variable=variable,
+                year=year, dataset=dataset, pressure_level=pressure_level,
+            )
 
             if target != final_target:
                 if os.path.exists(final_target):
                     logger.warning(f"{log_prefix}Final target {final_target} already exists, removing redundant file {target}")
                     os.remove(target)
                 else:
+                    final_dir = os.path.dirname(final_target)
+                    if final_dir:
+                        os.makedirs(final_dir, exist_ok=True)
                     os.rename(target, final_target)
                     logger.info(f"{log_prefix}Renamed {target} to {final_target}")
 
@@ -491,11 +585,12 @@ def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
             task_queue.task_done()
             break
 
-        year, variable, _, dataset, pressure_level, short_name, skip_existing = task
+        (year, variable, dataset, pressure_level, short_name,
+         skip_existing, path_pattern) = task
         client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
         outcome = submit_request(client, year, variable, dataset,
                                  pressure_level, skip_existing, worker_id, short_name,
-                                 report=report)
+                                 report=report, path_pattern=path_pattern)
         if outcome is not None:
             results_queue.put(outcome)
         task_queue.task_done()
@@ -517,10 +612,11 @@ def key_download_thread(results_queue, worker_id, report=None):
         item = results_queue.get()  # blocks indefinitely — no timeout
         if item is None:
             break
-        result, target, year, variable, dataset, pressure_level, short_name = item
+        (result, target, year, variable, dataset, pressure_level, short_name,
+         path_pattern) = item
         perform_download(result, target, year, variable, dataset,
                          pressure_level, short_name, worker_id,
-                         report=report)
+                         report=report, path_pattern=path_pattern)
     logger.info(f"Download thread {worker_id} finished")
 
 
@@ -738,6 +834,13 @@ def load_config_from_yaml(yaml_path):
     if short_names is not None and not isinstance(short_names, dict):
         raise ValueError("'short_names' must be a mapping of variable name to short name")
 
+    folder_pattern = raw.get('folder_pattern', None)
+    name_pattern = raw.get('name_pattern', None)
+    if folder_pattern is not None and not isinstance(folder_pattern, str):
+        raise ValueError("'folder_pattern' must be a string")
+    if name_pattern is not None and not isinstance(name_pattern, str):
+        raise ValueError("'name_pattern' must be a string")
+
     return {
         'years': years,
         'variables': variables,
@@ -748,6 +851,8 @@ def load_config_from_yaml(yaml_path):
         'download_workers': download_workers,
         'skip_existing': skip_existing,
         'short_names': short_names,
+        'folder_pattern': folder_pattern,
+        'name_pattern': name_pattern,
     }
 
 
@@ -784,6 +889,8 @@ if __name__ == '__main__':
         download_workers  = config['download_workers']
         skip_existing     = config['skip_existing']
         short_names       = config['short_names']
+        folder_pattern    = config['folder_pattern']
+        name_pattern      = config['name_pattern']
     else:
         ####################
         # Hardcoded Defaults (fallback when no --file is provided)
@@ -806,6 +913,11 @@ if __name__ == '__main__':
         # If skip_existing=True, short_names MUST be provided for reliable operation.
         # Example: short_names = {'convective_available_potential_energy': 'cape'}
         short_names = {'surface_pressure': 'sp'}
+        # Output path patterns (None -> use dataset-aware defaults).
+        # Supported placeholders: {short_name}, {variable}, {year},
+        # {pressure_level}, {dataset}.
+        folder_pattern = None
+        name_pattern = None
 
     ####################
     # Program
@@ -834,6 +946,15 @@ if __name__ == '__main__':
     if skip_existing and not short_names:
         logger.warning("skip_existing is True but no short_names provided. This may cause files to be re-downloaded.")
 
+    # Resolve dataset-aware defaults and combine folder_pattern + name_pattern
+    # into a single path_pattern here at the top level, so the request and
+    # download helpers only ever deal with one fully-formed template.
+    if folder_pattern is None:
+        folder_pattern = default_folder_pattern(dataset)
+    if name_pattern is None:
+        name_pattern = default_name_pattern(dataset)
+    path_pattern = os.path.join(folder_pattern, name_pattern) if folder_pattern else name_pattern
+
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
     logger.info("=== ERA5 Download Configuration ===")
@@ -855,6 +976,7 @@ if __name__ == '__main__':
     logger.info(f"Skip existing files: {skip_existing}")
     if short_names:
         logger.info(f"Using short names: {short_names}")
+    logger.info(f"Path pattern: {path_pattern}")
     logger.info("=================================")
 
     logger.info("Starting ERA5 download process with dynamic task assignment")
@@ -874,11 +996,13 @@ if __name__ == '__main__':
         if dataset == "reanalysis-era5-pressure-levels" and pressure_levels:
             for year, var, level in product(years, variables, pressure_levels):
                 var_short_name = short_names.get(var) if short_names else None
-                shared_task_queue.put((year, var, None, dataset, level, var_short_name, skip_existing))
+                shared_task_queue.put((year, var, dataset, level, var_short_name,
+                                       skip_existing, path_pattern))
         else:
             for year, var in product(years, variables):
                 var_short_name = short_names.get(var) if short_names else None
-                shared_task_queue.put((year, var, None, dataset, None, var_short_name, skip_existing))
+                shared_task_queue.put((year, var, dataset, None, var_short_name,
+                                       skip_existing, path_pattern))
 
         logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
 

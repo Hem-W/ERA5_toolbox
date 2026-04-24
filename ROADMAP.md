@@ -11,8 +11,8 @@ This document outlines the planned future development for the ERA5 Toolbox.
 - [x] Add CLI interface
     - [x] Add yaml template for input parameters
     - [ ] Improve logging launch logic
-    - [ ] Add name pattern option
-    - [ ] Add folder structure pattern option
+    - [x] Add name pattern option
+    - [x] Add folder structure pattern option
 - [ ] Add support for ERA5-Land datasets
 - [x] Add summary report for fast reviews after downloads
 

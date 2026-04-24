@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.3] - 20260424
+### Added
+- Configurable output path layout and file name pattern via `folder_pattern` and `name_pattern` YAML options, supporting `{short_name}`, `{variable}`, `{year}`, `{pressure_level}`, and `{dataset}` placeholders
+
+## [0.4.2] - 20260421
+### Added
+- Per-task summary report (`ReportCollector`) printed at the end
+
+## [0.4.1] - 20260419
+### Fixed
+- Final elapsed-time log now formats as `DdHHhMMm` instead of a `HH:MM:SS` string that wrapped past 24 hours
+
+## [0.4.0.dev] - 20260406
+### Added
+- YAML configuration file support with a `--file` / `-f` CLI flag and an `argparse` interface
+- `template_request.yaml` with commented defaults for every option
+
+## [0.3.2] - 20260406
+### Added
+- Pre-flight CDS API key validation (`validate_key` / `filter_valid_keys`)
+
+### Fixed
+- Logging is now configured inside the `__main__` guard so `multiprocessing.Manager` child processes no longer reinitialise it in macOS
+
+## [0.3.1.dev] - 20260330
+### Changed
+- `concurrent_requests` per API key for multiple request threads
+- Supervisor thread that waits for all request threads to finish before sending the sentinels that shut down the download pool
+
+## [0.3.0.dev] - 20260326
+### Added
+- Extracted `submit_request` and `perform_download` as independent callables; the request thread returns a self-contained `result` object that the download thread consumes
+
+## [0.2.2.dev] - 20250603
+### Changed
+- Removed the deprecated hardcoded `VB_MAP` lookup table (short names now come from the user's `short_names` mapping or are auto-detected from the NetCDF file)
+- Renamed the logger from `ERA5_downloader` to `ERA5_toolbox.downloader_ERA5` to match the package hierarchy
+
 ## [0.2.1] - 20250528
 ### Fixed
 - Fixed the logic of using urllib3 to download failed tasks from cdsapi
