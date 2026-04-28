@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.5.dev] - 20260428
+### Added
+- `RequestTask` and `DownloadTask` dataclasses now carry queue items and results, replacing long positional tuples
+
+### Changed
+- Request threads shut down via explicit `None` sentinels instead of a racy `timeout` + `queue.empty()` probe
+- Shared task queue switched from `multiprocessing.Manager().Queue()` to a plain `queue.Queue` (all workers are threads in the parent process)
+- Final elapsed-time log now includes seconds (`DdHHhMMmSSs` instead of `DdHHhMMm`)
+
+### Fixed
+- File handle is now properly released on every exit path in `get_variable_code_from_netcdf`
+
+### Removed
+- Unused `dataset` parameter from `default_folder_pattern()`
+- Dead `task is None` sentinel branch in the old `key_request_thread` loop
+
 ## [0.4.3] - 20260424
 ### Added
 - Configurable output path layout and file name pattern via `folder_pattern` and `name_pattern` YAML options, supporting `{short_name}`, `{variable}`, `{year}`, `{pressure_level}`, and `{dataset}` placeholders
