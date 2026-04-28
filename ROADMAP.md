@@ -10,7 +10,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
 - [ ] Allow no apikey file input (use .cdsapirc)
 - [x] Add CLI interface
     - [x] Add yaml template for input parameters
-    - [ ] Improve logging launch logic
+    - [x] Improve logging launch logic
     - [x] Add name pattern option
     - [x] Add folder structure pattern option
 - [ ] Add support for ERA5-Land datasets

@@ -11,7 +11,6 @@ import traceback
 import pathlib
 from itertools import product
 import cdsapi
-from multiprocessing import Manager
 import os
 import time
 import threading
@@ -23,12 +22,41 @@ import urllib3
 import json5
 import yaml
 import argparse
-import xarray as xr  # Added for robust NetCDF variable extraction
+import xarray as xr
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional
 
 # Script version
-__version__ = "0.4.3"
+__version__ = "0.4.5.dev"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
+
+# Full month/day/hour grids used by every CDS retrieve() — year-granular
+# downloads always request all months, days, and hours.
+_ALL_MONTHS = [f'{m:02d}' for m in range(1, 13)]
+_ALL_DAYS = [f'{d:02d}' for d in range(1, 32)]
+_ALL_HOURS = [f'{h:02d}:00' for h in range(24)]
+
+
+@dataclass(frozen=True)
+class RequestTask:
+    """One CDS retrieve() to issue: payload fields plus path-pattern context."""
+    year: int
+    variable: str
+    dataset: str
+    pressure_level: Optional[object]   # int | str | None at runtime
+    short_name: Optional[str]
+    skip_existing: bool
+    path_pattern: str
+
+
+@dataclass
+class DownloadTask:
+    """Server-prepared CDS result paired with its originating ``RequestTask``."""
+    result: object   # cdsapi Result (no public type to import)
+    target: str
+    request: RequestTask
 
 
 class ReportCollector:
@@ -92,9 +120,9 @@ class ReportCollector:
 
         if failures:
             # Group by stage for quick scanning
-            by_stage = {}
+            by_stage = defaultdict(list)
             for e in failures:
-                by_stage.setdefault(e['stage'] or 'unknown', []).append(e)
+                by_stage[e['stage'] or 'unknown'].append(e)
             out.info("--- Failures by stage ---")
             for stage, items in by_stage.items():
                 out.info(f"  failed at {stage}: {len(items)}")
@@ -213,8 +241,8 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
             preload_content=False  # Stream the response
         )
 
-        # Initialize progress bar
-        progress = file_size
+        # Initialize byte counter for progress tracking
+        downloaded_bytes = file_size
         with tqdm(total=total_size, initial=file_size, unit='B', unit_scale=True,
                   desc=f"Downloading {os.path.basename(target_path)}") as pbar:
 
@@ -222,14 +250,14 @@ def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
                 for chunk in response.stream(chunk_size):
                     if chunk:
                         f.write(chunk)
-                        progress += len(chunk)
+                        downloaded_bytes += len(chunk)
                         pbar.update(len(chunk))
 
         response.release_conn()
 
         # Verify if download is complete
-        if total_size > 0 and progress < total_size:
-            logger.warning(f"urllib3: Download incomplete for {target_path}: got {progress} bytes out of {total_size}")
+        if total_size > 0 and downloaded_bytes < total_size:
+            logger.warning(f"urllib3: Download incomplete for {target_path}: got {downloaded_bytes} bytes out of {total_size}")
             return False
 
         logger.info(f"urllib3: Successfully downloaded {target_path}")
@@ -251,90 +279,52 @@ def get_variable_code_from_netcdf(nc_file, api_variable):
     # Common auxiliary variables to exclude
     excluded = {'number', 'expver'}
     try:
-        # Open the NetCDF file with xarray (xarray automatically filters coordinates)
-        ds = xr.open_dataset(nc_file)
-
-        # Get data variables (non-coordinate variables)
-        data_vars = list(ds.data_vars)
-
-        # Filter out auxiliary variables
-        candidates = [v for v in data_vars if v not in excluded]
+        with xr.open_dataset(nc_file) as ds:
+            candidates = [v for v in ds.data_vars if v not in excluded]
 
         # Return the appropriate variable
         if api_variable in candidates:
-            var_code = api_variable
-        elif len(candidates) == 1:
-            var_code = candidates[0]
-        elif len(candidates) > 1:
+            return api_variable
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
             logger.info(f"Multiple variables found in NetCDF file: {candidates}")
             logger.info(f"Using first variable: {candidates[0]}")
-            var_code = candidates[0]
-        else:
-            logger.warning("No clear variable found, falling back to original name")
-            var_code = api_variable
-
-        # Always close the dataset before returning
-        ds.close()
-        return var_code
+            return candidates[0]
+        logger.warning("No clear variable found, falling back to original name")
+        return api_variable
 
     except Exception as e:
         logger.error(f"Error reading NetCDF file: {e}")
         return api_variable
 
 
-def default_folder_pattern(dataset):
-    """Return the default folder pattern for the given dataset.
-
-    Defaults keep each variable in its own subdirectory under ``hour/`` so the
-    output tree mirrors the canonical ERA5 layout.
-    """
+def default_folder_pattern():
+    """Default folder pattern: one ``hour/{short_name}`` subdir per variable."""
     return "hour/{short_name}"
 
 
 def default_name_pattern(dataset):
-    """Return the default file-name pattern for the given dataset.
-
-    The pressure-level default includes ``{pressure_level}hpa`` so files from
-    different levels do not collide when they share a folder.
-    """
+    """Default file-name pattern; pressure-level files include ``{pressure_level}hpa`` to avoid collisions."""
     if dataset == "reanalysis-era5-pressure-levels":
         return "era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
     return "era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
-
-
-def default_path_pattern(dataset):
-    """Return the combined default output path pattern for the given dataset."""
-    return os.path.join(default_folder_pattern(dataset),
-                        default_name_pattern(dataset))
 
 
 def build_target_path(path_pattern, *, short_name, variable, year, dataset,
                       pressure_level=None):
     """Compose the full output path by substituting placeholders.
 
-    Supported placeholders:
-        {short_name}     — variable short name; falls back to the API
-                           ``variable`` name when ``short_name`` is None
-        {variable}       — API variable name (e.g. ``surface_pressure``)
-        {year}           — year as an integer/string
-        {pressure_level} — pressure level in hPa; empty string when the
-                           dataset has no pressure level
-        {dataset}        — CDS dataset name
-
-    Args:
-        path_pattern:   Full path pattern (folder and name combined).
-        short_name:     Short name for the variable, or None to fall back to
-                        the API variable name.
-        variable:       API variable name.
-        year:           Year being downloaded.
-        dataset:        CDS dataset name.
-        pressure_level: Pressure level in hPa, if applicable.
-
-    Returns:
-        str: Composed path.
+    Supported placeholders (all optional in the pattern):
+        {short_name}     — variable short name; falls back to ``variable``
+                           when ``short_name`` is None.
+        {variable}       — API variable name (e.g. ``surface_pressure``).
+        {year}           — year being downloaded.
+        {pressure_level} — pressure level in hPa; empty string when absent.
+        {dataset}        — CDS dataset name.
 
     Raises:
-        ValueError: If the pattern is empty or references an unknown placeholder.
+        ValueError: if ``path_pattern`` is empty or references an unknown placeholder.
     """
     if not path_pattern:
         raise ValueError("path_pattern must be a non-empty string")
@@ -355,119 +345,93 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
         ) from e
 
 
-def submit_request(client, year, variable, dataset="reanalysis-era5-single-levels", pressure_level=None, skip_existing=True, worker_id=None, short_name=None, report=None, path_pattern=None):
+def submit_request(client, request_task, worker_id=None, report=None):
     """
     Submit a request to the CDS API and wait for the server to process it.
 
-    Each call must use a freshly created client: cdsapi.Client stores last_state as
-    an instance variable, so concurrent retrieve() calls on the same client corrupt
-    each other's state. The returned result object is fully self-contained; the client
-    is discarded after this function returns.
-
     Args:
-        client: A freshly created CDS client dedicated to this request
-        year: Year to download
-        variable: Variable to download
-        dataset: Dataset name
-        pressure_level: Pressure level in hPa (required for pressure-level dataset)
-        skip_existing: Whether to skip if the target file already exists
-        worker_id: Optional identifier for log prefixes
-        short_name: Optional short name for the variable used in the filename.
-                    If None, the variable name is used initially and the file is
-                    renamed after download based on the actual variable code.
-        path_pattern: Resolved output path pattern (folder + name combined).
-                      Required; the caller (``__main__``) is responsible for
-                      resolving dataset-aware defaults.
+        client: A *freshly created* CDS client dedicated to this request
+                (see ``key_request_thread`` for why clients are not reused).
+        request_task: ``RequestTask`` describing what to download.
+        worker_id: Optional identifier for log prefixes.
+        report: Optional ``ReportCollector`` to record outcome.
 
     Returns:
-        tuple: (result, target_path, year, variable, dataset, pressure_level,
-                short_name, path_pattern)
-               or None if the task was skipped or the request failed
+        DownloadTask ready for download, or None if the task was skipped
+        or the request failed.
     """
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
-
-    if path_pattern is None:
-        raise ValueError("path_pattern is required (resolve defaults at the top level)")
+    rt = request_task
 
     request = {
         'product_type': ['reanalysis'],
-        'variable': [variable],
-        'year': [str(year) if isinstance(year, int) else year],
-        'month': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'],
-        'day': ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12', '13', '14', '15', '16', '17', '18', '19', '20', '21', '22', '23', '24', '25', '26', '27', '28', '29', '30', '31'],
-        'time': ['00:00', '01:00', '02:00', '03:00', '04:00', '05:00', '06:00', '07:00', '08:00', '09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00', '23:00'],
+        'variable': [rt.variable],
+        'year': [str(rt.year)],
+        'month': _ALL_MONTHS,
+        'day': _ALL_DAYS,
+        'time': _ALL_HOURS,
         "data_format": "netcdf",
         "download_format": "unarchived"
     }
 
-    if dataset == "reanalysis-era5-pressure-levels":
-        if pressure_level is None:
+    if rt.dataset == "reanalysis-era5-pressure-levels":
+        if rt.pressure_level is None:
             raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
-        request["pressure_level"] = [pressure_level]
+        request["pressure_level"] = [rt.pressure_level]
 
     target = build_target_path(
-        path_pattern,
-        short_name=short_name, variable=variable,
-        year=year, dataset=dataset, pressure_level=pressure_level,
+        rt.path_pattern,
+        short_name=rt.short_name, variable=rt.variable,
+        year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level,
     )
 
     # Check for existing files before submitting to avoid wasting a server slot
-    if skip_existing:
-        if short_name is None:
-            logger.warning(f"{log_prefix}skip_existing is True but no short_name provided for {variable}. Cannot reliably check for existing files.")
+    if rt.skip_existing:
+        if rt.short_name is None:
+            logger.warning(f"{log_prefix}skip_existing is True but no short_name provided for {rt.variable}. Cannot reliably check for existing files.")
         else:
             if os.path.exists(target):
-                logger.info(f"{log_prefix}Skip existing file {target} for variable {variable}")
+                logger.info(f"{log_prefix}Skip existing file {target} for variable {rt.variable}")
                 if report is not None:
-                    report.add(year, variable, dataset, pressure_level,
+                    report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                                status='skipped')
                 return None
 
     logger.info(f"{log_prefix}Requesting {target}")
 
     try:
-        result = client.retrieve(dataset, request)
+        result = client.retrieve(rt.dataset, request)
         logger.info(f"{log_prefix}Request completed, result ready for {target}")
-        return (result, target, year, variable, dataset, pressure_level,
-                short_name, path_pattern)
+        return DownloadTask(result=result, target=target, request=rt)
     except Exception as e:
         logger.error(f"{log_prefix}Request failed for {target}: {str(e)}")
         logger.error(traceback.format_exc())
         if report is not None:
-            report.add(year, variable, dataset, pressure_level,
+            report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                        status='failed', stage='request', error=str(e))
         return None
 
 
-def perform_download(result, target, year, variable, dataset, pressure_level,
-                     short_name, worker_id=None, report=None,
-                     path_pattern=None):
+def perform_download(download_task, worker_id=None, report=None):
     """
     Download a prepared CDS result to disk.
 
-    The result object returned by retrieve() is self-contained — no client is needed.
-    Falls back to urllib3 via result.location if cdsapi's own download fails.
+    The result object inside ``download_task`` is self-contained — no client is
+    needed. Falls back to urllib3 via ``result.location`` if cdsapi's own
+    download fails.
 
     Args:
-        result: The result object returned by client.retrieve()
-        target: Target file path
-        year: Year (used for rename logic when short_name is None)
-        variable: Original API variable name (used for rename logic)
-        dataset: Dataset name (used for rename logic)
-        pressure_level: Pressure level (used for rename logic)
-        short_name: Short name used in the filename (None triggers auto-rename)
-        worker_id: Optional identifier for log prefixes
-        path_pattern: Resolved output path pattern (used for rename logic).
-                      Required; the caller is responsible for resolving
-                      dataset-aware defaults.
+        download_task: ``DownloadTask`` returned by ``submit_request``.
+        worker_id: Optional identifier for log prefixes.
+        report: Optional ``ReportCollector`` to record outcome.
 
     Returns:
-        bool: True if download succeeded, False otherwise
+        bool: True if download succeeded, False otherwise.
     """
     log_prefix = f"Worker {worker_id}: " if worker_id else ""
-
-    if path_pattern is None:
-        raise ValueError("path_pattern is required (resolve defaults at the top level)")
+    rt = download_task.request
+    result = download_task.result
+    target = download_task.target
 
     # Ensure the output directory exists before the downloader writes into it.
     target_dir = os.path.dirname(target)
@@ -492,7 +456,7 @@ def perform_download(result, target, year, variable, dataset, pressure_level,
             download_url = None
             try:
                 download_url = result.location
-            except (AttributeError, Exception):
+            except AttributeError:
                 logger.warning(f"{log_prefix}Could not get direct download URL, cannot use urllib3 fallback")
 
             if download_url:
@@ -518,13 +482,13 @@ def perform_download(result, target, year, variable, dataset, pressure_level,
                 raise
 
         # Rename the file when short_name was not provided (auto-detect from NetCDF)
-        if short_name is None and os.path.exists(target):
-            actual_var_code = get_variable_code_from_netcdf(target, variable)
+        if rt.short_name is None and os.path.exists(target):
+            actual_var_code = get_variable_code_from_netcdf(target, rt.variable)
 
             final_target = build_target_path(
-                path_pattern,
-                short_name=actual_var_code, variable=variable,
-                year=year, dataset=dataset, pressure_level=pressure_level,
+                rt.path_pattern,
+                short_name=actual_var_code, variable=rt.variable,
+                year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level,
             )
 
             if target != final_target:
@@ -539,7 +503,7 @@ def perform_download(result, target, year, variable, dataset, pressure_level,
                     logger.info(f"{log_prefix}Renamed {target} to {final_target}")
 
         if report is not None:
-            report.add(year, variable, dataset, pressure_level,
+            report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                        status='success', via=download_via)
         return True
 
@@ -550,7 +514,7 @@ def perform_download(result, target, year, variable, dataset, pressure_level,
             logger.info(f"{log_prefix}Removing broken file {target}")
             os.remove(target)
         if report is not None:
-            report.add(year, variable, dataset, pressure_level,
+            report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                        status='failed',
                        stage=failure_stage or 'default_download',
                        error=str(e))
@@ -559,64 +523,46 @@ def perform_download(result, target, year, variable, dataset, pressure_level,
 
 def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
     """
-    Request thread for one API key.
+    Request thread for one API key. Submits one retrieve() at a time.
 
-    Submits one retrieve() at a time per thread. Multiple instances of this
-    function can run concurrently for the same key (each with its own fresh
-    cdsapi.Client) to keep several requests queued on the server side.
+    Multiple instances run concurrently for the same key to keep several
+    requests queued on the CDS server. A fresh ``cdsapi.Client`` is created
+    per task because ``Client.last_state`` is an instance attribute — reusing
+    a client across concurrent retrieve() calls corrupts its state.
 
-    Does NOT send sentinels — start_key_workers() manages that via a supervisor
-    thread that waits for all request threads to finish before signalling the
-    download pool.
-
-    Each task gets a fresh cdsapi.Client because Client.last_state is an instance
-    variable — reusing a client across tasks would cause state corruption.
+    Shutdown: the thread exits on a ``None`` sentinel from ``task_queue``.
+    The caller must enqueue one sentinel per request thread after all real
+    tasks. Sentinels for the download pool are handled separately by
+    ``start_key_workers``' supervisor.
     """
     logger.info(f"Request thread {worker_id} started")
     while True:
-        try:
-            task = task_queue.get(timeout=10)
-        except queue.Empty:
-            if task_queue.empty():
-                break
-            continue
-
-        if task is None:  # explicit stop signal
-            task_queue.task_done()
+        task = task_queue.get()
+        if task is None:  # stop signal
             break
 
-        (year, variable, dataset, pressure_level, short_name,
-         skip_existing, path_pattern) = task
         client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
-        outcome = submit_request(client, year, variable, dataset,
-                                 pressure_level, skip_existing, worker_id, short_name,
-                                 report=report, path_pattern=path_pattern)
+        outcome = submit_request(client, task, worker_id=worker_id, report=report)
         if outcome is not None:
             results_queue.put(outcome)
-        task_queue.task_done()
 
     logger.info(f"Request thread {worker_id} finished")
 
 
 def key_download_thread(results_queue, worker_id, report=None):
     """
-    Download thread that consumes ready results from the request thread.
+    Consume ready ``DownloadTask`` items from ``results_queue`` and download them.
 
-    Uses a blocking get() with no timeout so the thread stays alive for the full
-    run duration, even when the CDS server takes hours to process a request.
-    Exits only when it receives the None sentinel sent by the request thread after
-    all tasks are exhausted.
+    Blocks on ``results_queue.get()`` so the thread stays alive through long
+    server waits, and exits on a ``None`` sentinel sent by
+    ``start_key_workers``' supervisor after all request threads finish.
     """
     logger.info(f"Download thread {worker_id} started")
     while True:
-        item = results_queue.get()  # blocks indefinitely — no timeout
+        item = results_queue.get()
         if item is None:
             break
-        (result, target, year, variable, dataset, pressure_level, short_name,
-         path_pattern) = item
-        perform_download(result, target, year, variable, dataset,
-                         pressure_level, short_name, worker_id,
-                         report=report, path_pattern=path_pattern)
+        perform_download(item, worker_id=worker_id, report=report)
     logger.info(f"Download thread {worker_id} finished")
 
 
@@ -740,35 +686,30 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
     Raises:
         RuntimeError: If no valid keys could be loaded
     """
-    keys_file = "cdsapi_keys.json" if keys_file is None else keys_file
+    keys_file = keys_file or "cdsapi_keys.json"
+
+    if not os.path.exists(keys_file):
+        logger.error(f"API keys file {keys_file} not found.")
+        raise RuntimeError(f"API keys file {keys_file} not found. Please create this file with your API keys.")
+
     try:
-        if not os.path.exists(keys_file):
-            logger.error(f"API keys file {keys_file} not found.")
-            raise RuntimeError(f"API keys file {keys_file} not found. Please create this file with your API keys.")
-
         with open(keys_file, 'r') as f:
-            try:
-                data = json5.load(f)
-            except Exception as e:
-                logger.error(f"Error parsing {keys_file} with JSON5: {str(e)}")
-                raise RuntimeError(f"Error parsing {keys_file}. Please ensure it contains valid JSON. JSON5 error: {str(e)}")
-
-        if not isinstance(data, dict) or 'keys' not in data or not isinstance(data['keys'], list):
-            logger.error(f"Invalid format in {keys_file}. Expected 'keys' list.")
-            raise RuntimeError(f"Invalid format in {keys_file}. Expected a JSON object with a 'keys' list.")
-
-        keys = data['keys']
-        if not keys:
-            logger.error(f"No keys found in {keys_file}")
-            raise RuntimeError(f"No keys found in {keys_file}. Please add at least one API key.")
-
-        logger.info(f"Successfully loaded {len(keys)} API keys from {keys_file}")
-        return keys
+            data = json5.load(f)
     except Exception as e:
-        if isinstance(e, RuntimeError):
-            raise
-        logger.error(f"Error loading API keys from {keys_file}: {str(e)}")
-        raise RuntimeError(f"Error loading API keys from {keys_file}: {str(e)}")
+        logger.error(f"Error reading {keys_file}: {str(e)}")
+        raise RuntimeError(f"Error reading {keys_file}. Please ensure it is readable and contains valid JSON. Underlying error: {str(e)}") from e
+
+    if not isinstance(data, dict) or 'keys' not in data or not isinstance(data['keys'], list):
+        logger.error(f"Invalid format in {keys_file}. Expected 'keys' list.")
+        raise RuntimeError(f"Invalid format in {keys_file}. Expected a JSON object with a 'keys' list.")
+
+    keys = data['keys']
+    if not keys:
+        logger.error(f"No keys found in {keys_file}")
+        raise RuntimeError(f"No keys found in {keys_file}. Please add at least one API key.")
+
+    logger.info(f"Successfully loaded {len(keys)} API keys from {keys_file}")
+    return keys
 
 def load_config_from_yaml(yaml_path):
     """
@@ -825,6 +766,10 @@ def load_config_from_yaml(yaml_path):
     # --- optional fields with defaults ---
     dataset = raw.get('dataset', 'reanalysis-era5-single-levels')
     pressure_levels = raw.get('pressure_levels', None)
+    if isinstance(pressure_levels, (int, str)):
+        pressure_levels = [pressure_levels]
+    elif pressure_levels is not None and not isinstance(pressure_levels, list):
+        raise ValueError("'pressure_levels' must be an int, str, or list of int/str")
     api_keys_file = raw.get('api_keys_file', None)
     concurrent_requests = int(raw.get('concurrent_requests', 4))
     download_workers = int(raw.get('download_workers', 1))
@@ -922,7 +867,7 @@ if __name__ == '__main__':
     ####################
     # Program
     ####################
-    # Configure logging (here so the Manager child process does not re-run this)
+    # Configure logging
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_filename = f"era5_download_{current_time}.log"
     logging.basicConfig(
@@ -950,7 +895,7 @@ if __name__ == '__main__':
     # into a single path_pattern here at the top level, so the request and
     # download helpers only ever deal with one fully-formed template.
     if folder_pattern is None:
-        folder_pattern = default_folder_pattern(dataset)
+        folder_pattern = default_folder_pattern()
     if name_pattern is None:
         name_pattern = default_name_pattern(dataset)
     path_pattern = os.path.join(folder_pattern, name_pattern) if folder_pattern else name_pattern
@@ -962,12 +907,8 @@ if __name__ == '__main__':
         logger.info(f"Years: {years.start} to {years.stop - 1} ({len(years)} years)")
     else:
         logger.info(f"Years: {years} ({len(years)} years)")
-    # Convert single variable string to list, or keep as list if already a list
-    variables = [variables] if isinstance(variables, str) else variables
     logger.info(f"Variables: {', '.join(variables)}")
     logger.info(f"Dataset: {dataset}")
-    # Convert single pressure level to list, or keep as list if already a list
-    pressure_levels = [pressure_levels] if isinstance(pressure_levels, (int, str)) else pressure_levels
     if pressure_levels:
         logger.info(f"Pressure Levels: {', '.join(str(p) for p in pressure_levels)} hPa")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
@@ -987,38 +928,42 @@ if __name__ == '__main__':
     # Collect per-task outcomes from every worker thread for the final summary
     report = ReportCollector()
 
-    # Create a Manager for sharing resources across processes
-    with Manager() as manager:
-        # Create a shared task queue
-        shared_task_queue = manager.Queue()
+    shared_task_queue = queue.Queue()
 
-        # Fill the queue with all year-variable-pressure_level combinations
-        if dataset == "reanalysis-era5-pressure-levels" and pressure_levels:
-            for year, var, level in product(years, variables, pressure_levels):
-                var_short_name = short_names.get(var) if short_names else None
-                shared_task_queue.put((year, var, dataset, level, var_short_name,
-                                       skip_existing, path_pattern))
-        else:
-            for year, var in product(years, variables):
-                var_short_name = short_names.get(var) if short_names else None
-                shared_task_queue.put((year, var, dataset, None, var_short_name,
-                                       skip_existing, path_pattern))
+    # Fill the queue with all year-variable-pressure_level combinations
+    # (levels collapses to [None] for datasets without pressure levels).
+    levels = pressure_levels or [None]
+    for year, var, level in product(years, variables, levels):
+        var_short_name = short_names.get(var) if short_names else None
+        shared_task_queue.put(RequestTask(
+            year=year, variable=var, dataset=dataset,
+            pressure_level=level, short_name=var_short_name,
+            skip_existing=skip_existing, path_pattern=path_pattern,
+        ))
 
-        logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
+    logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
 
-        # Start pipeline (request thread + download pool) for each key
-        all_threads = []
-        for key in cdsapi_keys:
-            key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests, report=report)
-            all_threads.extend(key_threads)
+    # One stop sentinel per request thread so each one exits cleanly.
+    total_request_threads = len(cdsapi_keys) * concurrent_requests
+    for _ in range(total_request_threads):
+        shared_task_queue.put(None)
 
-        # Wait for all threads to complete
-        for t in all_threads:
-            t.join()
+    # Start pipeline (request thread + download pool) for each key
+    all_threads = []
+    for key in cdsapi_keys:
+        key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests, report=report)
+        all_threads.extend(key_threads)
+
+    # Wait for all threads to complete
+    for t in all_threads:
+        t.join()
 
     # Calculate elapsed time
-    _td = datetime.timedelta(seconds=int(time.time() - start_time))
-    logger.info(f"All dataset requests and downloads completed in {_td.days:02d}d{_td.seconds//3600:02d}h{_td.seconds%3600//60:02d}m")
+    elapsed = int(time.time() - start_time)
+    days, rem = divmod(elapsed, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    logger.info(f"All dataset requests and downloads completed in {days:02d}d{hours:02d}h{minutes:02d}m{seconds:02d}s")
 
     # Final summary report
     report.print_summary()
