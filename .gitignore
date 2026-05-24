@@ -4,8 +4,11 @@
 # Log files
 *.log
 
-# AI memory
-CLAUDE.md
+# Unnecessary markdown files
+*.md
+!README.md
+!ROADMAP.md
+!CHANGELOG.md
 
 # Python bytecode
 __pycache__/
