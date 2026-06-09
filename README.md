@@ -171,3 +171,4 @@ The script loads API keys from a separate JSON file, which:
 
 - Resampling ERA5 data: `utils/resampler_ERA5.py`
 - Calculate relative humidity from temperature and specific humidity: `utils/humid-helper_ERA5.py`
+- Region selection (fast `cdo sellonlatbox` replacement): `utils/region_selector_ERA5.py`
