@@ -44,6 +44,7 @@ import argparse
 import logging
 from datetime import datetime
 
+import dask
 import numpy as np
 import xarray as xr
 
@@ -238,7 +239,14 @@ def select_region(
         ds_sel.attrs["history"] = (f"{stamp}: {op}\n{prev_hist}").strip()
 
         logger.info("Writing subset (streaming via dask)...")
-        ds_sel.to_netcdf(output_file, encoding=encoding)
+        # HDF5/netCDF4 is not thread-safe. With dask's default multi-threaded
+        # scheduler, many worker threads contend for the single HDF5 global
+        # lock while concurrently reading the source and writing the output,
+        # which can deadlock (more cores -> higher chance). Force the
+        # single-threaded synchronous scheduler: it removes the contention
+        # entirely with no real speed penalty for this I/O-bound subsetting.
+        with dask.config.set(scheduler="synchronous"):
+            ds_sel.to_netcdf(output_file, encoding=encoding)
         logger.info("Done.")
     finally:
         ds.close()
