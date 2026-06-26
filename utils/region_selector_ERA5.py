@@ -122,6 +122,7 @@ def select_region(
     chunk_time=None,
     complevel=1,
     overwrite=True,
+    use_dask=False,
 ):
     """
     Extract a lon/lat box from a NetCDF file and write it to ``output_file``.
@@ -137,14 +138,17 @@ def select_region(
     lat1, lat2 : float
         Latitude bounds (any order).
     chunk_time : int or None
-        Dask chunk size along the time dimension. ``None`` (default) aligns
-        with the file's native on-disk time chunk size, which avoids
-        repeatedly decompressing the same compressed chunk and is essential
-        for speed. Override only if you understand the storage layout.
+        Dask chunk size along the time dimension; only used when
+        ``use_dask=True``. ``None`` aligns with the file's native on-disk
+        time chunk size (recommended for the dask path).
     complevel : int
         zlib compression level for the output (0 disables compression).
     overwrite : bool
         Overwrite the output file if it exists (mirrors ``cdo -O``).
+    use_dask : bool
+        Opt-in to dask streaming (single-threaded synchronous scheduler)
+        instead of the default in-memory path. Only needed when the selected
+        subset is too large to fit comfortably in RAM.
     """
     logger = logging.getLogger("ERA5_toolbox.region_selector_ERA5")
 
@@ -158,6 +162,8 @@ def select_region(
     out_dir = os.path.dirname(output_file)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
+
+    tmp_output = f"{output_file}.{os.getpid()}.tmp"
 
     # Peek at coordinate names / time dimension without decoding everything.
     with xr.open_dataset(input_file) as probe:
@@ -208,17 +214,22 @@ def select_region(
         f"Subset: {lon_idx.size}/{n_lon_full} lon x {lat_idx.size}/{n_lat_full} lat points"
     )
 
-    if time_name is None:
-        chunks = {}
+    if use_dask:
+        # Opt-in dask path: align chunks to the native on-disk time chunk.
+        if time_name is None:
+            chunks = {}
+        else:
+            t_chunk = chunk_time if chunk_time is not None else native_time_chunk
+            chunks = {time_name: t_chunk} if t_chunk else {}
+            logger.info(
+                f"Time chunking: {t_chunk if t_chunk else 'auto'} "
+                f"(native on-disk: {native_time_chunk})"
+            )
+        ds = xr.open_dataset(input_file, chunks=chunks)
     else:
-        # Prefer the explicit override, else the native on-disk chunk, else "auto".
-        t_chunk = chunk_time if chunk_time is not None else native_time_chunk
-        chunks = {time_name: t_chunk} if t_chunk else {}
-        logger.info(
-            f"Time chunking: {t_chunk if t_chunk else 'auto'} "
-            f"(native on-disk: {native_time_chunk})"
-        )
-    ds = xr.open_dataset(input_file, chunks=chunks)
+        # Default path: no dask. isel reads only the selected hyperslab, so the
+        # full global array is never materialised.
+        ds = xr.open_dataset(input_file)
     try:
         ds_sel = ds.isel({lon_name: lon_idx, lat_name: lat_idx})
 
@@ -238,15 +249,39 @@ def select_region(
         prev_hist = ds_sel.attrs.get("history", "")
         ds_sel.attrs["history"] = (f"{stamp}: {op}\n{prev_hist}").strip()
 
-        logger.info("Writing subset (streaming via dask)...")
-        # HDF5/netCDF4 is not thread-safe. With dask's default multi-threaded
-        # scheduler, many worker threads contend for the single HDF5 global
-        # lock while concurrently reading the source and writing the output,
-        # which can deadlock (more cores -> higher chance). Force the
-        # single-threaded synchronous scheduler: it removes the contention
-        # entirely with no real speed penalty for this I/O-bound subsetting.
-        with dask.config.set(scheduler="synchronous"):
-            ds_sel.to_netcdf(output_file, encoding=encoding)
+        try:
+            if use_dask:
+                # HDF5/netCDF4 is not thread-safe. With dask's default multi-threaded
+                # scheduler, many worker threads contend for the single HDF5 global
+                # lock while concurrently reading the source and writing the output,
+                # which can deadlock (more cores -> higher chance). Force the
+                # single-threaded synchronous scheduler to remove the contention.
+                logger.info("Writing subset (dask, synchronous scheduler)...")
+                with dask.config.set(scheduler="synchronous"):
+                    ds_sel.to_netcdf(tmp_output, encoding=encoding)
+            else:
+                # No dask: write directly. xarray reads only the selected
+                # hyperslab (never the full global array) and materialises one
+                # variable at a time during the serial write, so the full dataset
+                # is never held in memory at once. nbytes is computed from
+                # dtype x size without reading any data.
+                est_gib = ds_sel.nbytes / 1024 ** 3
+                if est_gib > 8.0:
+                    logger.warning(
+                        f"Subset is ~{est_gib:.1f} GiB; the largest variable is "
+                        f"read into memory while writing. If this risks exhausting "
+                        f"RAM, re-run with --use-dask."
+                    )
+                logger.info(f"Writing subset (in-memory, ~{est_gib:.2f} GiB)...")
+                ds_sel.to_netcdf(tmp_output, encoding=encoding)
+            os.replace(tmp_output, output_file)
+        except BaseException:
+            try:
+                if os.path.exists(tmp_output):
+                    os.remove(tmp_output)
+            except OSError:
+                pass
+            raise
         logger.info("Done.")
     finally:
         ds.close()
@@ -277,9 +312,15 @@ def main():
     box.add_argument("--lat-max", type=float, default=None, help="Northern latitude (lat2)")
 
     parser.add_argument(
+        "--use-dask", action="store_true",
+        help="Stream the write via dask (single-threaded synchronous "
+             "scheduler) instead of the default in-memory path. Only needed "
+             "when the selected subset is too large to fit in RAM.",
+    )
+    parser.add_argument(
         "--chunk-time", type=int, default=None,
-        help="Dask chunk size along the time dimension. Default aligns with "
-             "the file's native on-disk chunk size (recommended for speed).",
+        help="Dask chunk size along the time dimension; only used with "
+             "--use-dask. Default aligns with the file's native on-disk chunk.",
     )
     parser.add_argument(
         "--complevel", type=int, default=1,
@@ -326,6 +367,7 @@ def main():
             chunk_time=args.chunk_time,
             complevel=args.complevel,
             overwrite=not args.no_overwrite,
+            use_dask=args.use_dask,
         )
     except Exception as e:
         logger.critical(f"Failed: {e}", exc_info=True)
