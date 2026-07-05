@@ -104,14 +104,15 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
     
     # TODO: get data_var from current_file for later use; decouple "variable" in file name from data_var
     
+    # Get the data variable name from the current file (needed regardless of time_shift_hours)
+    with xr.open_dataset(current_file) as temp_ds:
+        data_var = list(temp_ds.data_vars)[0]
+    
     # Determine time_shift_hours based on data type if not explicitly set
     if time_shift_hours is None:
         try:
             # Open the NetCDF file and read the attribute
             with xr.open_dataset(current_file) as temp_ds:
-                # Get the first (and typically only) data variable name
-                data_var = list(temp_ds.data_vars)[0]
-                
                 # Check if the GRIB_stepType attribute exists
                 if 'GRIB_stepType' in temp_ds[data_var].attrs:
                     step_type = temp_ds[data_var].attrs['GRIB_stepType']
