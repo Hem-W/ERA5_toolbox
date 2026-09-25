@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Script version
-__version__ = "0.4.5"
+__version__ = "0.4.6"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -930,11 +930,29 @@ if __name__ == '__main__':
 
     shared_task_queue = queue.Queue()
 
-    # Fill the queue with all year-variable-pressure_level combinations
-    # (levels collapses to [None] for datasets without pressure levels).
-    levels = pressure_levels or [None]
+    # Fill the queue with all year-variable-pressure_level combinations.
+    # Pressure levels only apply to the pressure-levels dataset: elsewhere the
+    # level is dropped from both the request and the path pattern.
+    if dataset == "reanalysis-era5-pressure-levels":
+        levels = pressure_levels or [None]
+    else:
+        if pressure_levels:
+            logger.warning(f"pressure_levels {pressure_levels} ignored for dataset {dataset}")
+        levels = [None]
+
+    seen_targets = set()
     for year, var, level in product(years, variables, levels):
         var_short_name = short_names.get(var) if short_names else None
+        # Two tasks sharing a target would download concurrently into one file
+        target = build_target_path(
+            path_pattern, short_name=var_short_name, variable=var,
+            year=year, dataset=dataset, pressure_level=level,
+        )
+        if target in seen_targets:
+            logger.error(f"Multiple tasks resolve to the same output path {target}; "
+                         f"check that path_pattern distinguishes every task")
+            sys.exit(1)
+        seen_targets.add(target)
         shared_task_queue.put(RequestTask(
             year=year, variable=var, dataset=dataset,
             pressure_level=level, short_name=var_short_name,
