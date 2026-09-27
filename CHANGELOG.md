@@ -1,6 +1,14 @@
 # Changelog
+## [0.4.6] - 20260925
+### Added
+- `utils/region_selector_ERA5.py`: region subsetting utility; opt-in `--use-dask` flag streams the write via dask, otherwise the subset is written in-memory (warns above ~8 GiB). Output is written to a temp file and atomically renamed
 
-## [0.4.5.dev] - 20260428
+### Fixed
+- Supplying `pressure_levels` for a single-level dataset no longer queues duplicate tasks that download concurrently into the same file; the run now exits with an error if any two tasks resolve to the same output path
+- `utils/resampler_ERA5.py`: `UnboundLocalError` for `data_var` when `time_shift_hours` is set explicitly
+- `utils/region_selector_ERA5.py`: HDF5 deadlock under dask's multi-threaded scheduler; the dask path now uses the synchronous scheduler
+
+## [0.4.5] - 20260428
 ### Added
 - `RequestTask` and `DownloadTask` dataclasses now carry queue items and results, replacing long positional tuples
 
