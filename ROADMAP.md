@@ -10,13 +10,7 @@ This document outlines the planned future development for the ERA5 Toolbox.
     - [ ] Utilize https://codes.ecmwf.int/grib/param-db/; OR
     - [ ] Conduct a test run on grib2 to use ecCodes
 - [ ] Allow no apikey file input (use .cdsapirc)
-- [x] Add CLI interface
-    - [x] Add yaml template for input parameters
-    - [x] Improve logging launch logic
-    - [x] Add name pattern option
-    - [x] Add folder structure pattern option
-- [ ] Add support for ERA5-Land datasets
-- [x] Add summary report for fast reviews after downloads
+- [x] Add support for ERA5-Land datasets
 
 ## Long-term Vision
 

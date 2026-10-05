@@ -1,4 +1,13 @@
 # Changelog
+
+## [0.5.0.dev] - 20261005
+### Added
+- ERA5-Land support: annual tasks expand into monthly CDS requests and separate monthly files, with downloading overlapping subsequent requests
+- `{month}` output-path placeholder and ERA5-Land default file names: `era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc`
+
+### Changed
+- Output-path validation now checks all targets before validating API credentials, rejecting patterns that would cause file collisions
+
 ## [0.4.6] - 20260925
 ### Added
 - `utils/region_selector_ERA5.py`: region subsetting utility; opt-in `--use-dask` flag streams the write via dask, otherwise the subset is written in-memory (warns above ~8 GiB). Output is written to a temp file and atomically renamed

@@ -15,7 +15,7 @@ A tool for downloading ERA5 climate data from the Copernicus Climate Data Store 
 - Automatic file name handling:
   - Optional automatic variable short name extraction from NetCDF files
   - Skip existing files when provided with short names
-- Supports both ERA5 single-level and pressure-level datasets
+- Supports ERA5 single-level and pressure-level datasets, and ERA5-Land dataset
 
 ## Installation
 
@@ -67,12 +67,6 @@ Create a YAML configuration file based on `template_request.yaml` and run:
 python -u downloader_ERA5.py --file my_config.yaml
 ```
 
-Or run in the background:
-
-```bash
-nohup python -u downloader_ERA5.py --file my_config.yaml &
-```
-
 See `template_request.yaml` for a commented example with all available parameters.
 
 ### Option 2: Hardcoded in Script
@@ -105,7 +99,7 @@ short_names = {
 }
 ```
 
-### Single-Level Data Example
+### ERA5 Single-Level Example
 
 To download single-level ERA5 data:
 
@@ -113,7 +107,6 @@ To download single-level ERA5 data:
 years = range(1940, 2025)
 variables = ["toa_incident_solar_radiation", "2m_temperature", "total_precipitation"]
 dataset = "reanalysis-era5-single-levels"
-# Define short names for better file naming and skipping existing files
 short_names = {
     "toa_incident_solar_radiation": "tisr", 
     "2m_temperature": "t2m", 
@@ -121,7 +114,7 @@ short_names = {
 }
 ```
 
-### Pressure-Level Data Example
+### ERA5 Pressure-Level Example
 
 To download pressure-level ERA5 data:
 
@@ -137,6 +130,24 @@ short_names = {
 }
 ```
 
+### ERA5-Land Example
+
+To download ERA5-land data:
+
+```python
+years = range(1950, 2025)
+variables = ["volumetric_soil_water_layer_1", "volumetric_soil_water_layer_2", "volumetric_soil_water_layer_3"]
+dataset = "reanalysis-era5-land"
+short_names = {
+    "volumetric_soil_water_layer_1": "swvl1", 
+    "volumetric_soil_water_layer_2": "swvl2", 
+    "volumetric_soil_water_layer_3": "swvl3"
+}
+```
+
+Note that ERA5-land files are always requested and stored separately for each month,
+as the whole year request exceeds the data size limits of CDS.
+
 ## Output Path Layout
 
 Downloaded files are written to `<folder_pattern>/<name_pattern>`, both of
@@ -147,14 +158,16 @@ Placeholders available in either pattern:
   name when no entry is provided in `short_names`)
 - `{variable}` — CDS API variable name (e.g. `surface_pressure`)
 - `{year}` — year being downloaded
-- `{pressure_level}` — pressure level in hPa (empty for single-level data)
+- `{month}` — two-digit month for ERA5-Land (only for ERA5-land tasks)
+- `{pressure_level}` — pressure level in hPa (only for ERA5 pressure-level tasks)
 - `{dataset}` — CDS dataset name
 
 When a pattern is omitted, dataset-aware defaults are used:
 
 - `folder_pattern`: `hour/{short_name}`
-- `name_pattern` (single-level): `era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc`
-- `name_pattern` (pressure-level): `era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc`
+- `name_pattern` (ERA5 single-level): `era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc`
+- `name_pattern` (ERA5 pressure-level): `era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc`
+- `name_pattern` (ERA5-Land): `era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc`
 
 The variable short name can be:
 
@@ -172,3 +185,12 @@ The script loads API keys from a separate JSON file, which:
 - Resampling ERA5 data: `utils/resampler_ERA5.py`
 - Calculate relative humidity from temperature and specific humidity: `utils/humid-helper_ERA5.py`
 - Region selection (fast `cdo sellonlatbox` replacement): `utils/region_selector_ERA5.py`
+
+## Offline Tests
+
+Run in the environment installed above; tests use local NetCDF fixtures and
+mock CDS responses without submitting download requests:
+
+```bash
+python -m unittest discover -s tests -v
+```

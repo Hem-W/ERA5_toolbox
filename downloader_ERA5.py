@@ -24,16 +24,14 @@ import yaml
 import argparse
 import xarray as xr
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 # Script version
-__version__ = "0.4.6"
+__version__ = "0.5.0.dev"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
-# Full month/day/hour grids used by every CDS retrieve() — year-granular
-# downloads always request all months, days, and hours.
 _ALL_MONTHS = [f'{m:02d}' for m in range(1, 13)]
 _ALL_DAYS = [f'{d:02d}' for d in range(1, 32)]
 _ALL_HOURS = [f'{h:02d}:00' for h in range(24)]
@@ -41,7 +39,7 @@ _ALL_HOURS = [f'{h:02d}:00' for h in range(24)]
 
 @dataclass(frozen=True)
 class RequestTask:
-    """One CDS retrieve() to issue: payload fields plus path-pattern context."""
+    """Annual queue task; month is set only for internally expanded requests."""
     year: int
     variable: str
     dataset: str
@@ -49,6 +47,7 @@ class RequestTask:
     short_name: Optional[str]
     skip_existing: bool
     path_pattern: str
+    month: Optional[int] = None
 
 
 @dataclass
@@ -64,7 +63,7 @@ class ReportCollector:
     Thread-safe collector for per-task outcomes across the download pipeline.
 
     Each entry is a dict with keys:
-        year, variable, dataset, pressure_level,
+        year, month, variable, dataset, pressure_level,
         status:  'success' | 'skipped' | 'failed'
         stage:   None                      (for success/skipped)
                  'request'                 (retrieve() raised)
@@ -78,9 +77,10 @@ class ReportCollector:
         self.entries = []
 
     def add(self, year, variable, dataset, pressure_level,
-            status, stage=None, via=None, error=None):
+            status, stage=None, via=None, error=None, month=None):
         entry = {
             'year': year,
+            'month': month,
             'variable': variable,
             'dataset': dataset,
             'pressure_level': pressure_level,
@@ -94,7 +94,8 @@ class ReportCollector:
 
     def _task_label(self, e):
         pl = f" @{e['pressure_level']}hPa" if e['pressure_level'] else ""
-        return f"{e['variable']}{pl} {e['year']}"
+        month = f"-{e['month']:02d}" if e.get('month') is not None else ""
+        return f"{e['variable']}{pl} {e['year']}{month}"
 
     def print_summary(self, log=None):
         """Print a human-readable summary via `log` (defaults to module logger)."""
@@ -306,13 +307,15 @@ def default_folder_pattern():
 
 def default_name_pattern(dataset):
     """Default file-name pattern; pressure-level files include ``{pressure_level}hpa`` to avoid collisions."""
+    if dataset == "reanalysis-era5-land":
+        return "era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc"
     if dataset == "reanalysis-era5-pressure-levels":
         return "era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc"
     return "era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc"
 
 
 def build_target_path(path_pattern, *, short_name, variable, year, dataset,
-                      pressure_level=None):
+                      pressure_level=None, month=None):
     """Compose the full output path by substituting placeholders.
 
     Supported placeholders (all optional in the pattern):
@@ -320,6 +323,7 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
                            when ``short_name`` is None.
         {variable}       — API variable name (e.g. ``surface_pressure``).
         {year}           — year being downloaded.
+        {month}          — two-digit month; empty string for annual tasks.
         {pressure_level} — pressure level in hPa; empty string when absent.
         {dataset}        — CDS dataset name.
 
@@ -333,6 +337,7 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
         'short_name': short_name if short_name is not None else variable,
         'variable': variable,
         'year': year,
+        'month': '' if month is None else f'{month:02d}',
         'dataset': dataset,
         'pressure_level': '' if pressure_level is None else pressure_level,
     }
@@ -343,6 +348,50 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
             f"Unknown placeholder {e} in path_pattern; "
             f"supported placeholders: {sorted(ctx.keys())}"
         ) from e
+
+
+def iter_request_parts(task):
+    """Expand an annual task at the CDS boundary; other ERA5 tasks stay annual."""
+    if task.dataset == "reanalysis-era5-land":
+        for month in range(1, 13):
+            yield replace(task, month=month)
+    else:
+        yield task
+
+
+def build_request_tasks(*, years, variables, dataset, path_pattern,
+                        pressure_levels=None, short_names=None,
+                        skip_existing=True):
+    """Build annual queue tasks, checking every eventual output path up front."""
+    if dataset == "reanalysis-era5-pressure-levels":
+        levels = pressure_levels or [None]
+    else:
+        if pressure_levels:
+            logger.warning(f"pressure_levels {pressure_levels} ignored for dataset {dataset}")
+        levels = [None]
+
+    tasks = []
+    seen_targets = set()
+    for year, var, level in product(years, variables, levels):
+        short_name = short_names.get(var) if short_names else None
+        task = RequestTask(
+            year=year, variable=var, dataset=dataset, pressure_level=level,
+            short_name=short_name, skip_existing=skip_existing,
+            path_pattern=path_pattern,
+        )
+        for part in iter_request_parts(task):
+            target = build_target_path(
+                path_pattern, short_name=short_name, variable=var, year=year,
+                dataset=dataset, pressure_level=level, month=part.month,
+            )
+            if target in seen_targets:
+                raise ValueError(
+                    f"Multiple tasks resolve to the same output path {target}; "
+                    "check that path_pattern distinguishes every task"
+                )
+            seen_targets.add(target)
+        tasks.append(task)
+    return tasks
 
 
 def submit_request(client, request_task, worker_id=None, report=None):
@@ -374,6 +423,11 @@ def submit_request(client, request_task, worker_id=None, report=None):
         "download_format": "unarchived"
     }
 
+    if rt.dataset == "reanalysis-era5-land":
+        request.pop('product_type')
+        request['year'] = str(rt.year)
+        request['month'] = f'{rt.month:02d}'
+
     if rt.dataset == "reanalysis-era5-pressure-levels":
         if rt.pressure_level is None:
             raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
@@ -382,7 +436,7 @@ def submit_request(client, request_task, worker_id=None, report=None):
     target = build_target_path(
         rt.path_pattern,
         short_name=rt.short_name, variable=rt.variable,
-        year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level,
+        year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level, month=rt.month,
     )
 
     # Check for existing files before submitting to avoid wasting a server slot
@@ -394,7 +448,7 @@ def submit_request(client, request_task, worker_id=None, report=None):
                 logger.info(f"{log_prefix}Skip existing file {target} for variable {rt.variable}")
                 if report is not None:
                     report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
-                               status='skipped')
+                               status='skipped', month=rt.month)
                 return None
 
     logger.info(f"{log_prefix}Requesting {target}")
@@ -408,7 +462,7 @@ def submit_request(client, request_task, worker_id=None, report=None):
         logger.error(traceback.format_exc())
         if report is not None:
             report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
-                       status='failed', stage='request', error=str(e))
+                       status='failed', stage='request', error=str(e), month=rt.month)
         return None
 
 
@@ -488,7 +542,7 @@ def perform_download(download_task, worker_id=None, report=None):
             final_target = build_target_path(
                 rt.path_pattern,
                 short_name=actual_var_code, variable=rt.variable,
-                year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level,
+                year=rt.year, dataset=rt.dataset, pressure_level=rt.pressure_level, month=rt.month,
             )
 
             if target != final_target:
@@ -504,7 +558,7 @@ def perform_download(download_task, worker_id=None, report=None):
 
         if report is not None:
             report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
-                       status='success', via=download_via)
+                       status='success', via=download_via, month=rt.month)
         return True
 
     except Exception as e:
@@ -517,17 +571,17 @@ def perform_download(download_task, worker_id=None, report=None):
             report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                        status='failed',
                        stage=failure_stage or 'default_download',
-                       error=str(e))
+                       error=str(e), month=rt.month)
         return False
 
 
 def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
     """
-    Request thread for one API key. Submits one retrieve() at a time.
+    Consume annual tasks for one API key, submitting one retrieve() at a time.
 
     Multiple instances run concurrently for the same key to keep several
     requests queued on the CDS server. A fresh ``cdsapi.Client`` is created
-    per task because ``Client.last_state`` is an instance attribute — reusing
+    per retrieve() because ``Client.last_state`` is an instance attribute — reusing
     a client across concurrent retrieve() calls corrupts its state.
 
     Shutdown: the thread exits on a ``None`` sentinel from ``task_queue``.
@@ -541,10 +595,11 @@ def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
         if task is None:  # stop signal
             break
 
-        client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
-        outcome = submit_request(client, task, worker_id=worker_id, report=report)
-        if outcome is not None:
-            results_queue.put(outcome)
+        for part in iter_request_parts(task):
+            client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
+            outcome = submit_request(client, part, worker_id=worker_id, report=report)
+            if outcome is not None:
+                results_queue.put(outcome)
 
     logger.info(f"Request thread {worker_id} finished")
 
@@ -859,7 +914,7 @@ if __name__ == '__main__':
         # Example: short_names = {'convective_available_potential_energy': 'cape'}
         short_names = {'surface_pressure': 'sp'}
         # Output path patterns (None -> use dataset-aware defaults).
-        # Supported placeholders: {short_name}, {variable}, {year},
+        # Supported placeholders: {short_name}, {variable}, {year}, {month},
         # {pressure_level}, {dataset}.
         folder_pattern = None
         name_pattern = None
@@ -881,12 +936,6 @@ if __name__ == '__main__':
     logger.info(f"ERA5 Downloader Version: {__version__}")
     logger.info(f"Configuration source: {config_source}")
 
-    # Load API keys from JSON file and validate each one
-    try:
-        cdsapi_keys = filter_valid_keys(load_api_keys(api_keys_file))
-    except RuntimeError as e:
-        logger.error(str(e))
-        sys.exit(1)
     # Validate configuration
     if skip_existing and not short_names:
         logger.warning("skip_existing is True but no short_names provided. This may cause files to be re-downloaded.")
@@ -899,6 +948,23 @@ if __name__ == '__main__':
     if name_pattern is None:
         name_pattern = default_name_pattern(dataset)
     path_pattern = os.path.join(folder_pattern, name_pattern) if folder_pattern else name_pattern
+
+    try:
+        tasks = build_request_tasks(
+            years=years, variables=variables, dataset=dataset,
+            path_pattern=path_pattern, pressure_levels=pressure_levels,
+            short_names=short_names, skip_existing=skip_existing,
+        )
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+
+    # Validate credentials only after local configuration and path checks pass.
+    try:
+        cdsapi_keys = filter_valid_keys(load_api_keys(api_keys_file))
+    except RuntimeError as e:
+        logger.error(str(e))
+        sys.exit(1)
 
     # Log initial configuration
     key_prefixes = [key[:4] for key in cdsapi_keys]
@@ -930,34 +996,8 @@ if __name__ == '__main__':
 
     shared_task_queue = queue.Queue()
 
-    # Fill the queue with all year-variable-pressure_level combinations.
-    # Pressure levels only apply to the pressure-levels dataset: elsewhere the
-    # level is dropped from both the request and the path pattern.
-    if dataset == "reanalysis-era5-pressure-levels":
-        levels = pressure_levels or [None]
-    else:
-        if pressure_levels:
-            logger.warning(f"pressure_levels {pressure_levels} ignored for dataset {dataset}")
-        levels = [None]
-
-    seen_targets = set()
-    for year, var, level in product(years, variables, levels):
-        var_short_name = short_names.get(var) if short_names else None
-        # Two tasks sharing a target would download concurrently into one file
-        target = build_target_path(
-            path_pattern, short_name=var_short_name, variable=var,
-            year=year, dataset=dataset, pressure_level=level,
-        )
-        if target in seen_targets:
-            logger.error(f"Multiple tasks resolve to the same output path {target}; "
-                         f"check that path_pattern distinguishes every task")
-            sys.exit(1)
-        seen_targets.add(target)
-        shared_task_queue.put(RequestTask(
-            year=year, variable=var, dataset=dataset,
-            pressure_level=level, short_name=var_short_name,
-            skip_existing=skip_existing, path_pattern=path_pattern,
-        ))
+    for task in tasks:
+        shared_task_queue.put(task)
 
     logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
 
