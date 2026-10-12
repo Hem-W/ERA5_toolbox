@@ -3,6 +3,8 @@
 
 # Log files
 *.log
+*.out
+*.tsv
 
 # Unnecessary markdown files
 *.md

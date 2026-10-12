@@ -28,7 +28,7 @@ from dataclasses import dataclass, replace
 from typing import Optional
 
 # Script version
-__version__ = "0.5.0.dev"
+__version__ = "0.5.0"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 

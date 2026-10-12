@@ -1,12 +1,16 @@
 # Changelog
 
-## [0.5.0.dev] - 20261005
+## [0.5.0] - 20261005
 ### Added
-- ERA5-Land support: annual tasks expand into monthly CDS requests and separate monthly files, with downloading overlapping subsequent requests
-- `{month}` output-path placeholder and ERA5-Land default file names: `era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc`
+- ERA5-Land support: annual tasks expand into monthly CDS requests
+- `{month}` output-path placeholder for ERA5-Land default file names: `era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc`
+- `utils/resampler_ERA5.py`: `--dataset era5-land` reads monthly ERA5-Land files and writes one yearly file `era5-land.reanalysis.{var}.day{method}.0p1deg.global.{year}.nc`
+- `utils/resampler_ERA5.py`: ERA5-Land accumulated variables (cumulative from 00 UTC) only accept `--method sum`, which takes the 00 UTC value of the following day as the daily total instead of summing hourly values
 
 ### Changed
 - Output-path validation now checks all targets before validating API credentials, rejecting patterns that would cause file collisions
+- `utils/resampler_ERA5.py`: spatial chunks are applied when opening input files instead of rechunking afterwards
+- `utils/resampler_ERA5.py`: each dask worker's memory limit is set per year to hold one year of daily output (2x its size, plus pause headroom); `--workers` default is now 8
 
 ## [0.4.6] - 20260925
 ### Added
