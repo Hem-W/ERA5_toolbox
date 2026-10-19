@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+### Changed
+- ERA5-Land support fix: ERA5-Land years are split into 12 monthly tasks when the queue is built (ordered by year, then month) instead of being expanded serially inside a request thread.
+
 ## [0.5.0] - 20261005
 ### Added
 - ERA5-Land support: annual tasks expand into monthly CDS requests

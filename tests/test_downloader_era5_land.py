@@ -46,9 +46,6 @@ class LandDownloaderTests(unittest.TestCase):
         args.update(extra)
         return dl.build_request_tasks(**args)
 
-    def parts(self, **extra):
-        return [part for task in self.tasks(**extra) for part in dl.iter_request_parts(task)]
-
     def target(self, task):
         return Path(dl.build_target_path(
             task.path_pattern, year=task.year, variable=task.variable,
@@ -71,15 +68,27 @@ class LandDownloaderTests(unittest.TestCase):
                 self.assertEqual(config["years"], [2024])
                 self.assertNotIn("months", config)
 
-    def test_example_configuration(self):
-        config = dl.load_config_from_yaml(ROOT / "era5_land_request.yaml")
-        self.assertEqual(config["years"], [2024])
+    def test_example_land_configuration(self):
+        path = self.root / "land.yaml"
+        path.write_text(
+            "years:\n"
+            "  start: 2023\n"
+            "  stop: 2024\n"
+            "variables:\n"
+            "  - 2m_temperature\n"
+            "dataset: reanalysis-era5-land\n"
+            "short_names:\n"
+            "  2m_temperature: t2m\n"
+        )
+        config = dl.load_config_from_yaml(path)
+        self.assertEqual(list(config["years"]), [2023, 2024])
         self.assertNotIn("months", config)
+        self.assertEqual(config["dataset"], LAND)
         self.assertEqual(config["variables"], ["2m_temperature"])
         self.assertEqual(config["short_names"], {"2m_temperature": "t2m"})
 
     def test_land_january_request_matches_template(self):
-        task = self.parts()[0]
+        task = self.tasks()[0]
         client = Mock()
         outcome = dl.submit_request(client, task)
         client.retrieve.assert_called_once_with(LAND, {
@@ -91,33 +100,29 @@ class LandDownloaderTests(unittest.TestCase):
         self.assertEqual(Path(outcome.target).name,
                          "era5-land.reanalysis.t2m.1hr.0p1deg.global.202401.nc")
 
-    def test_calendar_days(self):
-        for year, month, days in ((2024, 2, 29), (2023, 2, 28), (2024, 4, 30), (2024, 12, 31)):
-            with self.subTest(year=year, month=month):
-                client = Mock()
-                dl.submit_request(client, self.parts(years=[year])[month - 1])
-                request = client.retrieve.call_args.args[1]
-                self.assertEqual(request["day"], [f"{d:02d}" for d in range(1, days + 1)])
-
-    def test_one_annual_task_expands_to_twelve_distinct_outputs(self):
+    def test_land_year_yields_twelve_monthly_tasks(self):
         tasks = self.tasks()
-        self.assertEqual(len(tasks), 1)
-        self.assertIsNone(tasks[0].month)
-        parts = list(dl.iter_request_parts(tasks[0]))
-        self.assertEqual([part.month for part in parts], list(range(1, 13)))
-        self.assertEqual(len({self.target(part) for part in parts}), 12)
-        self.assertTrue(all(part.pressure_level is None for part in parts))
-        self.assertEqual(len(self.tasks(years=[2023, 2024],
-                                       variables=["2m_temperature", "surface_pressure"])), 4)
+        self.assertEqual([task.month for task in tasks], list(range(1, 13)))
+        self.assertEqual(len({self.target(task) for task in tasks}), 12)
+        self.assertTrue(all(task.pressure_level is None for task in tasks))
+
+    def test_land_tasks_are_queued_chronologically(self):
+        tasks = self.tasks(years=[2023, 2024],
+                           variables=["2m_temperature", "surface_pressure"])
+        self.assertEqual(len(tasks), 48)
+        order = [(task.year, task.month) for task in tasks]
+        self.assertEqual(order, sorted(order))
+        self.assertEqual([task.variable for task in tasks[:2]],
+                         ["2m_temperature", "surface_pressure"])
 
     def test_path_collision_and_month_in_folder(self):
         with self.assertRaisesRegex(ValueError, "same output path"):
             self.tasks(path_pattern=str(self.root / "{year}.{short_name}.nc"))
-        tasks = self.parts(path_pattern=str(self.root / "{month}" / "{year}.nc"))[:2]
+        tasks = self.tasks(path_pattern=str(self.root / "{month}" / "{year}.nc"))[:2]
         self.assertEqual([self.target(t).parent.name for t in tasks], ["01", "02"])
 
     def test_skip_and_request_failure_keep_month(self):
-        january, february = self.parts()[:2]
+        january, february = self.tasks()[:2]
         self.target(january).parent.mkdir(parents=True)
         self.local_result().download(str(self.target(january)))
         report = dl.ReportCollector()
@@ -135,7 +140,7 @@ class LandDownloaderTests(unittest.TestCase):
 
     def test_real_netcdf_automatic_rename_preserves_month_and_values(self):
         report = dl.ReportCollector()
-        for task in self.parts(short_names=None)[:2]:
+        for task in self.tasks(short_names=None)[:2]:
             original = self.target(task)
             result = self.local_result(value=280.0 + task.month)
             self.assertTrue(dl.perform_download(dl.DownloadTask(result, str(original), task), report=report))
@@ -150,7 +155,7 @@ class LandDownloaderTests(unittest.TestCase):
     def test_download_failures_keep_month(self):
         for fallback in (False, True):
             with self.subTest(fallback=fallback):
-                task = self.parts()[1]
+                task = self.tasks()[1]
                 result = Mock(spec=["download", "location"] if fallback else ["download"])
                 result.download.side_effect = RuntimeError("download failed")
                 if fallback:
@@ -165,7 +170,7 @@ class LandDownloaderTests(unittest.TestCase):
                                  "fallback_download" if fallback else "default_download")
 
     def test_fallback_success_keeps_month(self):
-        task = self.parts()[2]
+        task = self.tasks()[2]
         result = Mock()
         result.download.side_effect = RuntimeError("use fallback")
         result.location = "https://example.invalid/test.nc"
@@ -187,7 +192,6 @@ class LandDownloaderTests(unittest.TestCase):
                 self.assertEqual(len(tasks), len(levels or [None]))
                 for task in tasks:
                     self.assertIsNone(task.month)
-                    self.assertEqual(list(dl.iter_request_parts(task)), [task])
                     client = Mock()
                     outcome = dl.submit_request(client, replace(task, skip_existing=False))
                     expected = {
@@ -205,10 +209,11 @@ class LandDownloaderTests(unittest.TestCase):
                     self.assertEqual(outcome.target,
                                      f"era5.reanalysis.t2m.{pressure}1hr.0p25deg.global.2024.nc")
 
-    def test_annual_queue_streams_monthly_results_to_download_workers(self):
-        annual_task = self.tasks()[0]
+    def test_monthly_queue_streams_results_to_download_workers(self):
+        tasks = self.tasks()
         task_queue = queue.Queue()
-        task_queue.put(annual_task)
+        for task in tasks:
+            task_queue.put(task)
         task_queue.put(None)
         report = dl.ReportCollector()
         first_downloaded = threading.Event()
@@ -223,7 +228,7 @@ class LandDownloaderTests(unittest.TestCase):
             requests.append(request)
             if request["month"] == "02":
                 self.assertTrue(first_downloaded.wait(timeout=10),
-                                "Download queue was not fed while annual task was in progress")
+                                "Download queue was not fed while later months were pending")
             return results[int(request["month"]) - 1]
         clients = []
         def client_factory(**kwargs):
@@ -236,24 +241,25 @@ class LandDownloaderTests(unittest.TestCase):
                                            download_workers=1, concurrent_requests=1, report=report)
             for thread in threads:
                 thread.join(timeout=15)
-                self.assertFalse(thread.is_alive(), "Annual pipeline did not terminate")
+                self.assertFalse(thread.is_alive(), "Pipeline did not terminate")
         self.assertEqual(len(clients), 12)
         self.assertTrue(all(client.retrieve.call_count == 1 for client in clients))
         self.assertEqual([request["month"] for request in requests],
                          [f"{month:02d}" for month in range(1, 13)])
         self.assertEqual(sorted((e["month"], e["status"]) for e in report.entries),
                          [(month, "success") for month in range(1, 13)])
-        for part in dl.iter_request_parts(annual_task):
-            with xr.open_dataset(self.target(part)) as data:
-                self.assertEqual(data.t2m.item(), 280.0 + part.month)
+        for task in tasks:
+            with xr.open_dataset(self.target(task)) as data:
+                self.assertEqual(data.t2m.item(), 280.0 + task.month)
 
-    def test_annual_worker_continues_after_skipped_and_failed_months(self):
-        task = self.tasks()[0]
-        january = next(dl.iter_request_parts(task))
+    def test_worker_continues_after_skipped_and_failed_months(self):
+        tasks = self.tasks()
+        january = tasks[0]
         self.target(january).parent.mkdir(parents=True)
         self.local_result().download(str(self.target(january)))
         task_queue = queue.Queue()
-        task_queue.put(task)
+        for task in tasks:
+            task_queue.put(task)
         task_queue.put(None)
         results_queue = queue.Queue()
         report = dl.ReportCollector()

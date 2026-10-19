@@ -146,7 +146,9 @@ short_names = {
 ```
 
 Note that ERA5-land files are always requested and stored separately for each month,
-as the whole year request exceeds the data size limits of CDS.
+as the whole year request exceeds the data size limits of CDS. Each month is its own
+task in the shared queue, ordered by year then month, so concurrent workers progress
+through the period roughly chronologically.
 
 ## Output Path Layout
 

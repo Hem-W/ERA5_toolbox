@@ -24,11 +24,11 @@ import yaml
 import argparse
 import xarray as xr
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Optional
 
 # Script version
-__version__ = "0.5.0"
+__version__ = "0.5.1.dev"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -39,7 +39,7 @@ _ALL_HOURS = [f'{h:02d}:00' for h in range(24)]
 
 @dataclass(frozen=True)
 class RequestTask:
-    """Annual queue task; month is set only for internally expanded requests."""
+    """One CDS request producing one output file; ``month=None`` requests a whole year."""
     year: int
     variable: str
     dataset: str
@@ -350,19 +350,17 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
         ) from e
 
 
-def iter_request_parts(task):
-    """Expand an annual task at the CDS boundary; other ERA5 tasks stay annual."""
-    if task.dataset == "reanalysis-era5-land":
-        for month in range(1, 13):
-            yield replace(task, month=month)
-    else:
-        yield task
+def request_months(dataset):
+    """Months to request separately per year; ``[None]`` means one annual request."""
+    if dataset == "reanalysis-era5-land":
+        return list(range(1, 13))
+    return [None]
 
 
 def build_request_tasks(*, years, variables, dataset, path_pattern,
                         pressure_levels=None, short_names=None,
                         skip_existing=True):
-    """Build annual queue tasks, checking every eventual output path up front."""
+    """Build one task per output file in chronological order, checking for path collisions."""
     if dataset == "reanalysis-era5-pressure-levels":
         levels = pressure_levels or [None]
     else:
@@ -372,25 +370,23 @@ def build_request_tasks(*, years, variables, dataset, path_pattern,
 
     tasks = []
     seen_targets = set()
-    for year, var, level in product(years, variables, levels):
+    for year, month, var, level in product(years, request_months(dataset), variables, levels):
         short_name = short_names.get(var) if short_names else None
-        task = RequestTask(
+        target = build_target_path(
+            path_pattern, short_name=short_name, variable=var, year=year,
+            dataset=dataset, pressure_level=level, month=month,
+        )
+        if target in seen_targets:
+            raise ValueError(
+                f"Multiple tasks resolve to the same output path {target}; "
+                "check that path_pattern distinguishes every task"
+            )
+        seen_targets.add(target)
+        tasks.append(RequestTask(
             year=year, variable=var, dataset=dataset, pressure_level=level,
             short_name=short_name, skip_existing=skip_existing,
-            path_pattern=path_pattern,
-        )
-        for part in iter_request_parts(task):
-            target = build_target_path(
-                path_pattern, short_name=short_name, variable=var, year=year,
-                dataset=dataset, pressure_level=level, month=part.month,
-            )
-            if target in seen_targets:
-                raise ValueError(
-                    f"Multiple tasks resolve to the same output path {target}; "
-                    "check that path_pattern distinguishes every task"
-                )
-            seen_targets.add(target)
-        tasks.append(task)
+            path_pattern=path_pattern, month=month,
+        ))
     return tasks
 
 
@@ -577,7 +573,7 @@ def perform_download(download_task, worker_id=None, report=None):
 
 def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
     """
-    Consume annual tasks for one API key, submitting one retrieve() at a time.
+    Consume tasks for one API key, submitting one retrieve() at a time.
 
     Multiple instances run concurrently for the same key to keep several
     requests queued on the CDS server. A fresh ``cdsapi.Client`` is created
@@ -595,11 +591,10 @@ def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
         if task is None:  # stop signal
             break
 
-        for part in iter_request_parts(task):
-            client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
-            outcome = submit_request(client, part, worker_id=worker_id, report=report)
-            if outcome is not None:
-                results_queue.put(outcome)
+        client = cdsapi.Client(url="https://cds.climate.copernicus.eu/api", key=key)
+        outcome = submit_request(client, task, worker_id=worker_id, report=report)
+        if outcome is not None:
+            results_queue.put(outcome)
 
     logger.info(f"Request thread {worker_id} finished")
 
