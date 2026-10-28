@@ -40,6 +40,18 @@ skip_existing: true
 short_names:
   surface_pressure: sp
 
+# Hours to request. null = all 24 hours.
+# - ERA5-Land accumulated variables (tp, ssr, str, pev, e, ro, ...): use ['00:00'].
+#   They accumulate from 00 UTC, so the 00 UTC value of day D+1 is the total of day D.
+#   One annual request per year; default files hour/{short_name}/
+#   era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc.
+# - ERA5-Land with 1-11 hours -> one annual request per year ({month} is empty);
+#   12+ hours -> monthly requests as usual.
+# - Any times other than ERA5-Land ['00:00'] require an explicit name_pattern
+#   (the default names say 1hr).
+# times: ['00:00']
+times: null
+
 # Output path patterns (optional)
 # folder_pattern: hour/{short_name}
 # name_pattern: era5.reanalysis.{short_name}.1hr.0p25deg.global.{year}.nc
@@ -49,7 +61,8 @@ short_names:
 #                      name when no short_name is set for the variable)
 #   {variable}       - API variable name (e.g. surface_pressure)
 #   {year}           - year being downloaded
-#   {month}          - two-digit ERA5-Land month (only for ERA5-Land)
+#   {month}          - two-digit month for monthly ERA5-Land tasks; empty for
+#                      annual tasks (ERA5, and ERA5-Land with 1-11 times)
 #   {pressure_level} - pressure level in hPa (only for pressure-level datasets)
 #   {dataset}        - CDS dataset name
 #
@@ -61,3 +74,5 @@ short_names:
 #     era5.reanalysis.{short_name}.{pressure_level}hpa.1hr.0p25deg.global.{year}.nc
 #   name_pattern (ERA5-Land):
 #     era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc
+#   name_pattern (ERA5-Land with times: ['00:00']):
+#     era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc

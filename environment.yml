@@ -11,3 +11,4 @@ dependencies:
   - json5
   - xarray
   - pyyaml
+  - flox

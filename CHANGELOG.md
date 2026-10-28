@@ -1,8 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.1.dev]
+### Added
+- `times` option (YAML): request only some hours of the day, e.g. `['00:00']` for ERA5-Land accumulated variables, whose 00 UTC value of day D+1 is the total of day D (~1/24 of the hourly download). ERA5-Land with 1-11 hours is requested once per year; default files are `hour/{short_name}/era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc`; other `times` require an explicit `name_pattern`
+- Warning for unknown top-level keys in the YAML configuration (a typo such as `time:` was silently ignored)
+- `utils/resampler_ERA5.py`: `--dataset era5-land-00utc` reads those yearly 00 UTC files and writes the same daily-total files as `--dataset era5-land` (accumulated variables only)
+
 ### Changed
-- ERA5-Land support fix: ERA5-Land years are split into 12 monthly tasks when the queue is built (ordered by year, then month) instead of being expanded serially inside a request thread.
+- ERA5-Land support fix: ERA5-Land years are split into 12 monthly tasks when the queue is built (ordered by year, then month) instead of being expanded serially inside a request thread
+- `utils/resampler_ERA5.py`: new `--memory-limit` (e.g. `100GB`) sets every dask worker's limit as given, regardless of `--workers`
+
+### Fixed
+- `utils/resampler_ERA5.py`: the default worker limit is now max(whole-year gather need, 90% of available RAM / workers); the 0.5.0 limit, sized from the daily output only, was too small for yearly ERA5 inputs
 
 ## [0.5.0] - 20261005
 ### Added

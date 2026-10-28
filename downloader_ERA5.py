@@ -28,13 +28,23 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Script version
-__version__ = "0.5.1.dev"
+__version__ = "0.5.1"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
 _ALL_MONTHS = [f'{m:02d}' for m in range(1, 13)]
 _ALL_DAYS = [f'{d:02d}' for d in range(1, 32)]
 _ALL_HOURS = [f'{h:02d}:00' for h in range(24)]
+# ERA5-Land requests with at most this many hours per day are annual (a year of 11 hours <= a month of 24)
+_LAND_ANNUAL_MAX_TIMES = 11
+# ERA5-Land accumulations restart at 00 UTC, so the 00 UTC value of day D+1 is the total of day D
+_LAND_00UTC = ('00:00',)
+# Seconds to wait before each in-place retry of a failed CDS request
+_REQUEST_RETRY_DELAYS = (300, 900)
+# Extra passes over request-stage failures after the main pass, and the wait before each.
+# CDS can cancel many queued jobs at once (404 "job dismissed"), so give it time to recover.
+_RETRY_ROUNDS = 2
+_RETRY_ROUND_WAIT = 600
 
 
 @dataclass(frozen=True)
@@ -48,6 +58,7 @@ class RequestTask:
     skip_existing: bool
     path_pattern: str
     month: Optional[int] = None
+    times: Optional[tuple] = None   # hours to request, e.g. ('00:00',); None = all 24
 
 
 @dataclass
@@ -91,6 +102,13 @@ class ReportCollector:
         }
         with self._lock:
             self.entries.append(entry)
+
+    def pop_request_failures(self):
+        """Remove and return the (year, month, variable, pressure_level) of request-stage failures."""
+        with self._lock:
+            failed = [e for e in self.entries if e['status'] == 'failed' and e['stage'] == 'request']
+            self.entries = [e for e in self.entries if e not in failed]
+        return {(e['year'], e['month'], e['variable'], e['pressure_level']) for e in failed}
 
     def _task_label(self, e):
         pl = f" @{e['pressure_level']}hPa" if e['pressure_level'] else ""
@@ -305,8 +323,19 @@ def default_folder_pattern():
     return "hour/{short_name}"
 
 
-def default_name_pattern(dataset):
-    """Default file-name pattern; pressure-level files include ``{pressure_level}hpa`` to avoid collisions."""
+def default_name_pattern(dataset, times=None):
+    """Default file-name pattern; pressure-level files include ``{pressure_level}hpa`` to avoid collisions.
+
+    With ``times`` set, only ERA5-Land ``['00:00']`` has a default (yearly ``00utc`` files);
+    any other subset of hours needs an explicit name_pattern, since the defaults say ``1hr``.
+    """
+    if times is not None:
+        if dataset == "reanalysis-era5-land" and times == _LAND_00UTC:
+            return "era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc"
+        raise ValueError(
+            f"times {list(times)} for dataset {dataset} has no default file name "
+            "(the defaults are tagged '1hr'); set name_pattern explicitly"
+        )
     if dataset == "reanalysis-era5-land":
         return "era5-land.reanalysis.{short_name}.1hr.0p1deg.global.{year}{month}.nc"
     if dataset == "reanalysis-era5-pressure-levels":
@@ -350,16 +379,21 @@ def build_target_path(path_pattern, *, short_name, variable, year, dataset,
         ) from e
 
 
-def request_months(dataset):
-    """Months to request separately per year; ``[None]`` means one annual request."""
-    if dataset == "reanalysis-era5-land":
+def request_months(dataset, times=None):
+    """Months to request separately per year; ``[None]`` means one annual request.
+
+    ERA5-Land is split by month to stay within the CDS request size, unless at most
+    ``_LAND_ANNUAL_MAX_TIMES`` hours are requested: a year of those is no larger than
+    one month of all 24 hours.
+    """
+    if dataset == "reanalysis-era5-land" and (times is None or len(times) > _LAND_ANNUAL_MAX_TIMES):
         return list(range(1, 13))
     return [None]
 
 
 def build_request_tasks(*, years, variables, dataset, path_pattern,
                         pressure_levels=None, short_names=None,
-                        skip_existing=True):
+                        skip_existing=True, times=None):
     """Build one task per output file in chronological order, checking for path collisions."""
     if dataset == "reanalysis-era5-pressure-levels":
         levels = pressure_levels or [None]
@@ -370,7 +404,8 @@ def build_request_tasks(*, years, variables, dataset, path_pattern,
 
     tasks = []
     seen_targets = set()
-    for year, month, var, level in product(years, request_months(dataset), variables, levels):
+    times = tuple(times) if times is not None else None
+    for year, month, var, level in product(years, request_months(dataset, times), variables, levels):
         short_name = short_names.get(var) if short_names else None
         target = build_target_path(
             path_pattern, short_name=short_name, variable=var, year=year,
@@ -385,7 +420,7 @@ def build_request_tasks(*, years, variables, dataset, path_pattern,
         tasks.append(RequestTask(
             year=year, variable=var, dataset=dataset, pressure_level=level,
             short_name=short_name, skip_existing=skip_existing,
-            path_pattern=path_pattern, month=month,
+            path_pattern=path_pattern, month=month, times=times,
         ))
     return tasks
 
@@ -414,7 +449,7 @@ def submit_request(client, request_task, worker_id=None, report=None):
         'year': [str(rt.year)],
         'month': _ALL_MONTHS,
         'day': _ALL_DAYS,
-        'time': _ALL_HOURS,
+        'time': list(rt.times) if rt.times else _ALL_HOURS,
         "data_format": "netcdf",
         "download_format": "unarchived"
     }
@@ -422,7 +457,8 @@ def submit_request(client, request_task, worker_id=None, report=None):
     if rt.dataset == "reanalysis-era5-land":
         request.pop('product_type')
         request['year'] = str(rt.year)
-        request['month'] = f'{rt.month:02d}'
+        if rt.month is not None:
+            request['month'] = f'{rt.month:02d}'
 
     if rt.dataset == "reanalysis-era5-pressure-levels":
         if rt.pressure_level is None:
@@ -449,17 +485,23 @@ def submit_request(client, request_task, worker_id=None, report=None):
 
     logger.info(f"{log_prefix}Requesting {target}")
 
-    try:
-        result = client.retrieve(rt.dataset, request)
-        logger.info(f"{log_prefix}Request completed, result ready for {target}")
-        return DownloadTask(result=result, target=target, request=rt)
-    except Exception as e:
-        logger.error(f"{log_prefix}Request failed for {target}: {str(e)}")
-        logger.error(traceback.format_exc())
-        if report is not None:
-            report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
-                       status='failed', stage='request', error=str(e), month=rt.month)
-        return None
+    for delay in (*_REQUEST_RETRY_DELAYS, None):
+        try:
+            result = client.retrieve(rt.dataset, request)
+            logger.info(f"{log_prefix}Request completed, result ready for {target}")
+            return DownloadTask(result=result, target=target, request=rt)
+        except Exception as e:
+            logger.error(f"{log_prefix}Request failed for {target}: {str(e)}")
+            logger.error(traceback.format_exc())
+            # 400/401/403 (bad request, bad key, licence) will not fix themselves
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if delay is None or status in (400, 401, 403):
+                if report is not None:
+                    report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
+                               status='failed', stage='request', error=str(e), month=rt.month)
+                return None
+            logger.warning(f"{log_prefix}Retrying {target} in {delay}s")
+            time.sleep(delay)
 
 
 def perform_download(download_task, worker_id=None, report=None):
@@ -761,6 +803,30 @@ def load_api_keys(keys_file='cdsapi_keys.json'):
     logger.info(f"Successfully loaded {len(keys)} API keys from {keys_file}")
     return keys
 
+_CONFIG_KEYS = {
+    'years', 'variables', 'dataset', 'pressure_levels', 'api_keys_file',
+    'concurrent_requests', 'download_workers', 'skip_existing', 'short_names',
+    'folder_pattern', 'name_pattern', 'times',
+}
+
+
+def parse_times(times_raw):
+    """Validate ``times`` (str or list of ``HH:00``) into a sorted tuple; None or all 24 hours -> None."""
+    if times_raw is None:
+        return None
+    if isinstance(times_raw, str):
+        times_raw = [times_raw]
+    if not isinstance(times_raw, list) or not times_raw:
+        raise ValueError("'times' must be a non-empty string or list of 'HH:00' strings")
+    for t in times_raw:
+        if not isinstance(t, str) or t not in _ALL_HOURS:
+            raise ValueError(f"'times' entry {t!r} is not a whole hour 'HH:00' (00:00 to 23:00)")
+    if len(set(times_raw)) != len(times_raw):
+        raise ValueError(f"'times' has duplicate entries: {times_raw}")
+    times = tuple(sorted(times_raw))
+    return None if len(times) == len(_ALL_HOURS) else times
+
+
 def load_config_from_yaml(yaml_path):
     """
     Load download configuration from a YAML file.
@@ -771,7 +837,8 @@ def load_config_from_yaml(yaml_path):
     Returns:
         dict: Validated configuration with keys:
             years, variables, dataset, pressure_levels, api_keys_file,
-            concurrent_requests, download_workers, skip_existing, short_names.
+            concurrent_requests, download_workers, skip_existing, short_names,
+            folder_pattern, name_pattern, times.
 
     Raises:
         FileNotFoundError: If the YAML file does not exist.
@@ -786,6 +853,12 @@ def load_config_from_yaml(yaml_path):
 
     if not isinstance(raw, dict):
         raise ValueError(f"Expected a YAML mapping at the top level, got {type(raw).__name__}")
+
+    # Unknown keys are ignored, so warn: a typo such as `time:` would silently request all 24 hours
+    unknown = sorted(set(raw) - _CONFIG_KEYS)
+    if unknown:
+        logger.warning(f"Ignoring unknown configuration key(s) in {yaml_path}: {unknown}; "
+                       f"known keys: {sorted(_CONFIG_KEYS)}")
 
     # --- years (required) ---
     if 'years' not in raw:
@@ -835,6 +908,7 @@ def load_config_from_yaml(yaml_path):
         raise ValueError("'folder_pattern' must be a string")
     if name_pattern is not None and not isinstance(name_pattern, str):
         raise ValueError("'name_pattern' must be a string")
+    times = parse_times(raw.get('times', None))
 
     return {
         'years': years,
@@ -848,6 +922,7 @@ def load_config_from_yaml(yaml_path):
         'short_names': short_names,
         'folder_pattern': folder_pattern,
         'name_pattern': name_pattern,
+        'times': times,
     }
 
 
@@ -886,6 +961,7 @@ if __name__ == '__main__':
         short_names       = config['short_names']
         folder_pattern    = config['folder_pattern']
         name_pattern      = config['name_pattern']
+        times             = config['times']
     else:
         ####################
         # Hardcoded Defaults (fallback when no --file is provided)
@@ -913,6 +989,9 @@ if __name__ == '__main__':
         # {pressure_level}, {dataset}.
         folder_pattern = None
         name_pattern = None
+        # Hours to request (None = all 24). ERA5-Land accumulated variables: ['00:00'] gives the
+        # daily totals (00 UTC of day D+1 = total of day D), see template_request.yaml.
+        times = None
 
     ####################
     # Program
@@ -934,21 +1013,29 @@ if __name__ == '__main__':
     # Validate configuration
     if skip_existing and not short_names:
         logger.warning("skip_existing is True but no short_names provided. This may cause files to be re-downloaded.")
-
-    # Resolve dataset-aware defaults and combine folder_pattern + name_pattern
-    # into a single path_pattern here at the top level, so the request and
-    # download helpers only ever deal with one fully-formed template.
-    if folder_pattern is None:
-        folder_pattern = default_folder_pattern()
-    if name_pattern is None:
-        name_pattern = default_name_pattern(dataset)
-    path_pattern = os.path.join(folder_pattern, name_pattern) if folder_pattern else name_pattern
+    try:
+        times = parse_times(list(times) if times is not None else None)  # hardcoded defaults are unvalidated
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
+    if times is not None and dataset != "reanalysis-era5-land":
+        logger.warning(f"times {list(times)} for {dataset}: ERA5 accumulated variables are hourly increments, "
+                       "so their 00 UTC value is NOT a daily total (only ERA5-Land accumulates from 00 UTC)")
 
     try:
+        # Resolve dataset-aware defaults and combine folder_pattern + name_pattern
+        # into a single path_pattern here at the top level, so the request and
+        # download helpers only ever deal with one fully-formed template.
+        if folder_pattern is None:
+            folder_pattern = default_folder_pattern()
+        if name_pattern is None:
+            name_pattern = default_name_pattern(dataset, times)
+        path_pattern = os.path.join(folder_pattern, name_pattern) if folder_pattern else name_pattern
+
         tasks = build_request_tasks(
             years=years, variables=variables, dataset=dataset,
             path_pattern=path_pattern, pressure_levels=pressure_levels,
-            short_names=short_names, skip_existing=skip_existing,
+            short_names=short_names, skip_existing=skip_existing, times=times,
         )
     except ValueError as e:
         logger.error(str(e))
@@ -972,6 +1059,7 @@ if __name__ == '__main__':
     logger.info(f"Dataset: {dataset}")
     if pressure_levels:
         logger.info(f"Pressure Levels: {', '.join(str(p) for p in pressure_levels)} hPa")
+    logger.info(f"Times: {', '.join(times) if times else 'all 24 hours'}")
     logger.info(f"API Keys (first 4 digits): {', '.join(key_prefixes)}")
     logger.info(f"Concurrent requests per key: {concurrent_requests}")
     logger.info(f"Download workers per key: {download_workers}")
@@ -989,27 +1077,41 @@ if __name__ == '__main__':
     # Collect per-task outcomes from every worker thread for the final summary
     report = ReportCollector()
 
-    shared_task_queue = queue.Queue()
+    def run_pass(pass_tasks):
+        shared_task_queue = queue.Queue()
 
-    for task in tasks:
-        shared_task_queue.put(task)
+        for task in pass_tasks:
+            shared_task_queue.put(task)
 
-    logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
+        logger.info(f"Initialized shared task queue with {shared_task_queue.qsize()} tasks")
 
-    # One stop sentinel per request thread so each one exits cleanly.
-    total_request_threads = len(cdsapi_keys) * concurrent_requests
-    for _ in range(total_request_threads):
-        shared_task_queue.put(None)
+        # One stop sentinel per request thread so each one exits cleanly.
+        total_request_threads = len(cdsapi_keys) * concurrent_requests
+        for _ in range(total_request_threads):
+            shared_task_queue.put(None)
 
-    # Start pipeline (request thread + download pool) for each key
-    all_threads = []
-    for key in cdsapi_keys:
-        key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests, report=report)
-        all_threads.extend(key_threads)
+        # Start pipeline (request thread + download pool) for each key
+        all_threads = []
+        for key in cdsapi_keys:
+            key_threads = start_key_workers(key, shared_task_queue, download_workers, concurrent_requests, report=report)
+            all_threads.extend(key_threads)
 
-    # Wait for all threads to complete
-    for t in all_threads:
-        t.join()
+        # Wait for all threads to complete
+        for t in all_threads:
+            t.join()
+
+    run_pass(tasks)
+
+    # Retry rounds: rerun tasks whose request failed once the main pass has drained.
+    for round_no in range(1, _RETRY_ROUNDS + 1):
+        failed = report.pop_request_failures()
+        retry_tasks = [t for t in tasks if (t.year, t.month, t.variable, t.pressure_level) in failed]
+        if not retry_tasks:
+            break
+        logger.info(f"Retry round {round_no}/{_RETRY_ROUNDS}: {len(retry_tasks)} failed request(s) "
+                    f"after {_RETRY_ROUND_WAIT}s wait")
+        time.sleep(_RETRY_ROUND_WAIT)
+        run_pass(retry_tasks)
 
     # Calculate elapsed time
     elapsed = int(time.time() - start_time)
