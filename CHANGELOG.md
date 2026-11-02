@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.1.dev]
+## [0.5.1]
 ### Added
 - `times` option (YAML): request only some hours of the day, e.g. `['00:00']` for ERA5-Land accumulated variables, whose 00 UTC value of day D+1 is the total of day D (~1/24 of the hourly download). ERA5-Land with 1-11 hours is requested once per year; default files are `hour/{short_name}/era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc`; other `times` require an explicit `name_pattern`
 - Warning for unknown top-level keys in the YAML configuration (a typo such as `time:` was silently ignored)

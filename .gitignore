@@ -25,6 +25,9 @@ __pycache__/
 notebooks/test_*.ipynb
 notebooks/check_*.ipynb
 
+# One-off scripts
+scripts/
+
 # Template
 template/
 

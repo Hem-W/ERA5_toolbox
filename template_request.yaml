@@ -27,7 +27,7 @@ api_keys_file: null
 # Number of concurrent request threads per key
 # Each thread submits one retrieve() at a time, so N threads keep
 # N requests queued on the CDS server simultaneously.
-concurrent_requests: 4
+concurrent_requests: 3
 
 # Number of parallel download threads per key
 download_workers: 1
