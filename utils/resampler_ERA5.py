@@ -9,10 +9,11 @@ For accumulated variables like precipitation (tp), a time shift can be applied
 to correctly align the data with the daily periods.
 
 Features:
-    + dask distributed: each worker's memory limit is set per year from the size of one year's daily
-      output. The run stops if the job's expected peak (~2 such tasks) exceeds the RAM available at start.
-      --workers sets the worker count; with NetCDF/HDF5 each worker reads with ~1 core, so for more
-      throughput run several jobs (e.g. one per variable) in parallel
+    + dask distributed: per-worker memory limit = --memory-limit if given, else the larger of
+      (a) what the final whole-year gather needs (planned from one year of daily output) and
+      (b) 90% of available RAM / --workers. A limit is a cap, not a reservation, so limits may add up
+      to more than RAM (e.g. --workers 32 --threads 1 --memory-limit 100GB): only one worker holds the
+      whole year at a time. 
 
 Usage:
     python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 180 --workers 4 --threads 2 --method sum --time-shift-hours -1
@@ -20,10 +21,13 @@ Usage:
     python resampler_ERA5.py 2020 --variable tp --input-dir /path/to/input --output-dir /path/to/output --chunk-size 180 --workers 4 --threads 2 --method sum --time-shift-hours -1 --log-level DEBUG --log-dir /path/to/log
     python resampler_ERA5.py 2020 --dataset era5-land --variable swvl1 --input-dir ERA5-land/hour/swvl1 --output-dir ERA5-land/day/swvl1 --method mean
     python resampler_ERA5.py 2020 --dataset era5-land --variable tp --input-dir ERA5-land/hour/tp --output-dir ERA5-land/day/tp --method sum
+    python resampler_ERA5.py 2020 --dataset era5-land-00utc --variable tp --input-dir ERA5-land/hour/tp --output-dir ERA5-land/day/tp --method sum
 
 Input-Output file layout (--dataset):
     + era5      : one file per year,  era5.reanalysis.{var}.1hr.0p25deg.global.{YYYY}.nc
     + era5-land : one file per month, era5-land.reanalysis.{var}.1hr.0p1deg.global.{YYYYMM}.nc
+    + era5-land-00utc : one file per year of 00 UTC steps only (accumulated variables, --method sum),
+                  era5-land.reanalysis.{var}.00utc.0p1deg.global.{YYYY}.nc; year Y also reads Y+1 for Dec 31
     Output is always one file per year, e.g. era5-land.reanalysis.{var}.day{method}.0p1deg.global.{YYYY}.nc
     
 Advanced Usage:
@@ -37,6 +41,7 @@ import xarray as xr
 import pandas as pd
 import earthkit.transforms.aggregate
 import dask.distributed
+import dask.utils
 import argparse
 import os
 import logging
@@ -47,18 +52,26 @@ import psutil
 from datetime import datetime, timedelta
 
 
-# File naming per dataset; "monthly" datasets store one input file per month
+# File naming per dataset; "monthly" datasets store one input file per month, "freq" is the
+# time-step tag of the input file name. era5-land-00utc holds only the 00 UTC steps (downloader
+# `times: ['00:00']`), one file per year, for ERA5-Land accumulated variables
 DATASET_SPECS = {
-    "era5": {"prefix": "era5", "resolution": "0p25deg", "monthly": False},
-    "era5-land": {"prefix": "era5-land", "resolution": "0p1deg", "monthly": True},
+    "era5": {"prefix": "era5", "resolution": "0p25deg", "monthly": False, "freq": "1hr"},
+    "era5-land": {"prefix": "era5-land", "resolution": "0p1deg", "monthly": True, "freq": "1hr"},
+    "era5-land-00utc": {"prefix": "era5-land", "resolution": "0p1deg", "monthly": False, "freq": "00utc"},
 }
 
 
+def is_land(dataset):
+    """True for any ERA5-Land input layout (hourly monthly files or 00 UTC yearly files)"""
+    return DATASET_SPECS[dataset]["prefix"] == "era5-land"
+
+
 def input_file_path(input_dir, variable, year, month=None, dataset="era5"):
-    """Path of an hourly input file (month is required for monthly datasets)"""
+    """Path of an input file (month is required for monthly datasets)"""
     spec = DATASET_SPECS[dataset]
     stamp = f"{year}{month:02d}" if spec["monthly"] else f"{year}"
-    return os.path.join(input_dir, f"{spec['prefix']}.reanalysis.{variable}.1hr.{spec['resolution']}.global.{stamp}.nc")
+    return os.path.join(input_dir, f"{spec['prefix']}.reanalysis.{variable}.{spec['freq']}.{spec['resolution']}.global.{stamp}.nc")
 
 
 def output_file_path(output_dir, variable, year, method, dataset="era5"):
@@ -75,25 +88,30 @@ WORKER_PEAK_FRACTION = 0.7
 RAM_USABLE_FRACTION = 0.9
 
 
-def plan_memory(year, variable, input_dir, dataset="era5"):
+def plan_memory(year, variable, input_dir, dataset="era5", n_workers=1, memory_limit=None):
     """
-    Per-worker memory limit for one year, and a check that the job fits in the RAM available now.
+    Per-worker dask memory limit for one year.
     
-    One year of daily output (days x grid x itemsize) is gathered in a single task, so every worker's
-    limit must hold TASK_PEAK_FACTOR x that size, divided by WORKER_PEAK_FRACTION for headroom.
-    Limits are caps, not reservations: only one worker at a time holds the whole year, so the actual
-    peak of a job is about two such peaks (that worker + the main process holding the computed year).
-    That job peak, not n_workers x limit, is checked against RAM_USABLE_FRACTION of available RAM.
+    The final gather holds one year of daily output (days x grid x itemsize) in a single worker at
+    about TASK_PEAK_FACTOR x its size, so the minimum limit is that peak / WORKER_PEAK_FRACTION.
+    A limit is a cap, not a reservation: only one worker holds the whole year at a time, so the
+    job's actual peak is about two such peaks (that worker + the main process holding the result).
     
-    Returns the memory limit in bytes, or "auto" if the input file is missing
-    (process_year then reports the missing files).
+    memory_limit (bytes or e.g. "100GB") is used as given for every worker, regardless of n_workers;
+    a warning is logged if it is below the minimum. Otherwise the limit is
+    max(minimum, RAM_USABLE_FRACTION x available RAM / n_workers), so other tasks (e.g. large input
+    chunks of yearly ERA5 files) keep the headroom of dask's default.
+    
+    Raises MemoryError if the job's expected peak cannot fit in available RAM. Returns the limit in
+    bytes, or memory_limit/"auto" if the input file is missing (process_year then reports it).
     """
     logger = logging.getLogger("ERA5_resampler")
+    user_limit = dask.utils.parse_bytes(memory_limit) if isinstance(memory_limit, str) else memory_limit
     month = 1 if DATASET_SPECS[dataset]["monthly"] else None
     sample_file = input_file_path(input_dir, variable, year, month, dataset)
     if not os.path.exists(sample_file):
         logger.warning(f"Cannot plan worker memory, input file not found: {sample_file}")
-        return "auto"
+        return user_limit or "auto"
     
     with xr.open_dataset(sample_file) as ds:
         da = ds[list(ds.data_vars)[0]]
@@ -102,7 +120,7 @@ def plan_memory(year, variable, input_dir, dataset="era5"):
     n_days = 366 if calendar.isleap(year) else 365
     year_bytes = n_days * cells * itemsize
     task_peak = TASK_PEAK_FACTOR * year_bytes
-    memory_limit = int(task_peak / WORKER_PEAK_FRACTION)
+    min_limit = int(task_peak / WORKER_PEAK_FRACTION)
     job_peak = 2 * task_peak
     
     available = psutil.virtual_memory().available
@@ -110,10 +128,22 @@ def plan_memory(year, variable, input_dir, dataset="era5"):
         raise MemoryError(f"Not enough RAM for year {year}: the job peaks at about {job_peak / 1e9:.1f} GB "
                           f"(one worker + main process holding {task_peak / 1e9:.1f} GB each), "
                           f"but only {available / 1e9:.1f} GB is available")
+    
+    if user_limit is not None:
+        limit = int(user_limit)
+        source = "--memory-limit"
+        if limit < min_limit:
+            logger.warning(f"--memory-limit {limit / 1e9:.1f} GB is below the {min_limit / 1e9:.1f} GB the "
+                           f"final whole-year gather needs; the gathering worker will likely be killed")
+    else:
+        share = int(available * RAM_USABLE_FRACTION / n_workers)
+        limit = max(min_limit, share)
+        source = "gather minimum" if limit == min_limit else "RAM share"
     logger.info(f"Memory plan for {year}: one year of daily output = {year_bytes / 1e9:.1f} GB, "
-                f"worker limit {memory_limit / 1e9:.1f} GB, expected job peak {job_peak / 1e9:.1f} GB "
+                f"gather needs >= {min_limit / 1e9:.1f} GB per worker; worker limit {limit / 1e9:.1f} GB "
+                f"x {n_workers} workers ({source}); expected job peak {job_peak / 1e9:.1f} GB "
                 f"of {available / 1e9:.0f} GB available")
-    return memory_limit
+    return limit
 
 
 def setup_logging(log_level=logging.INFO, log_dir=None):
@@ -205,7 +235,7 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
     
     # ERA5-Land hourly accumulations are cumulative from 00 UTC (not hourly increments),
     # so their daily "sum" is taken from the 00 UTC values instead of summing hourly values
-    is_land_accum = dataset == "era5-land" and step_type == "accum"
+    is_land_accum = is_land(dataset) and step_type == "accum"
     check_method(method, dataset, data_var, step_type)
     if is_land_accum:
         return process_year_land_accum(year, variable, data_var, current_files, input_dir, output_dir,
@@ -344,7 +374,11 @@ def process_year(year, variable="tp", input_dir='./', output_dir='./day',
 
 def check_method(method, dataset, data_var, step_type):
     """Reject method/variable combinations that silently give wrong daily values"""
-    is_land_accum = dataset == "era5-land" and step_type == "accum"
+    if DATASET_SPECS[dataset]["freq"] == "00utc" and step_type != "accum":
+        raise ValueError(
+            f"{data_var} is not an accumulated variable (GRIB_stepType={step_type!r}): {dataset} files hold "
+            f"only 00 UTC snapshots, which give no daily {method}. Download hourly data for it instead.")
+    is_land_accum = is_land(dataset) and step_type == "accum"
     if is_land_accum and method != "sum":
         raise ValueError(
             f"{data_var} is an ERA5-Land accumulated variable (GRIB_stepType='accum'): its hourly values are "
@@ -429,7 +463,7 @@ def main():
     parser = argparse.ArgumentParser(description='Process ERA5 hourly data to daily statistics')
     parser.add_argument('years', type=int, nargs='+', help='Years to process')
     parser.add_argument('--dataset', type=str, choices=list(DATASET_SPECS), default='era5',
-                      help='Input dataset: era5 (yearly files) or era5-land (monthly files)')
+                      help='Input dataset: era5 (yearly files), era5-land (monthly files) or era5-land-00utc (yearly 00 UTC files of accumulated variables)')
     parser.add_argument('--variable', type=str, default='tp', 
                       help='ERA5 variable name (e.g., tp for precipitation)')
     parser.add_argument('--input-dir', type=str, default='./', 
@@ -437,7 +471,11 @@ def main():
     parser.add_argument('--output-dir', type=str, default='./day', 
                       help='Directory to save output files')
     parser.add_argument('--workers', type=int, default=8, 
-                      help='Number of dask workers (memory limit per worker is set by plan_memory)')
+                      help='Number of dask workers (prefer many workers with --threads 1)')
+    parser.add_argument('--memory-limit', type=str, default=None,
+                      help='Memory limit per dask worker, e.g. 100GB (default: max of the whole-year '
+                           'gather need and 90%% of available RAM / workers). It is a cap, not a '
+                           'reservation, so workers x limit may exceed RAM')
     parser.add_argument('--threads', type=int, default=2, 
                       help='Threads per dask worker')
     parser.add_argument('--chunk-size', type=int, default=180, 
@@ -461,12 +499,13 @@ def main():
     log_level = getattr(logging, args.log_level)
     logger = setup_logging(log_level=log_level, log_dir=args.log_dir)
     
-    try:
-        # Process each year
-        for year in args.years:
-            # Size the cluster so that one worker can hold the whole year of daily output
-            memory_limit = plan_memory(year, args.variable, args.input_dir, args.dataset)
+    # Process each year independently so one failure doesn't stop the rest
+    for year in args.years:
+        try:
+            # Per-worker limit: any worker must be able to hold the whole year of daily output
             n_workers = args.workers
+            memory_limit = plan_memory(year, args.variable, args.input_dir, args.dataset,
+                                       n_workers, args.memory_limit)
             # Setup dask client for each year to avoid resource accumulation/leakage
             logger.info(f"Initializing dask client for year {year} with {n_workers} workers and {args.threads} threads per worker")
             # Use a context manager to ensure the client is properly closed after each year
@@ -483,12 +522,9 @@ def main():
                     time_shift_hours=args.time_shift_hours,
                     dataset=args.dataset
                 )
-                
-        logger.info("All years processed successfully")
-    except Exception as e:
-        logger.exception(f"Error during processing: {str(e)}")
-        # Don't re-raise the exception to allow cleanup to happen
-    
+        except Exception:
+            logger.exception(f"Error processing year {year}")
+
     return args
 
 
