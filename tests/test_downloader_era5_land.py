@@ -31,6 +31,10 @@ class LandDownloaderTests(unittest.TestCase):
         self.client_guard = patch.object(dl.cdsapi, "Client", side_effect=AssertionError("Network forbidden"))
         self.client_guard.start()
         self.addCleanup(self.client_guard.stop)
+        # Keep the in-place request retry off so failure tests don't sleep.
+        retry_guard = patch.object(dl, "_REQUEST_RETRY_DELAYS", ())
+        retry_guard.start()
+        self.addCleanup(retry_guard.stop)
 
     def config(self, **extra):
         raw = dict(years=[2024], variables=["2m_temperature"], dataset=LAND)
@@ -290,6 +294,107 @@ class LandDownloaderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("same output path", result.stdout + result.stderr)
         self.assertNotIn("API keys file not found", result.stdout + result.stderr)
+
+    def test_request_retries_transient_error_but_not_auth_error(self):
+        task = self.tasks()[0]
+        client = Mock()
+        client.retrieve.side_effect = [Exception("job dismissed"), Mock()]
+        with patch.object(dl, "_REQUEST_RETRY_DELAYS", (300, 900)), \
+                patch.object(dl.time, "sleep") as sleep, self.assertLogs(dl.logger):
+            self.assertIsNotNone(dl.submit_request(client, task))
+        sleep.assert_called_once_with(300)
+        err = Exception("forbidden")
+        err.response = Mock(status_code=403)
+        client = Mock()
+        client.retrieve.side_effect = err
+        report = dl.ReportCollector()
+        with patch.object(dl, "_REQUEST_RETRY_DELAYS", (300, 900)), \
+                patch.object(dl.time, "sleep") as sleep, self.assertLogs(dl.logger):
+            self.assertIsNone(dl.submit_request(client, task, report=report))
+        sleep.assert_not_called()
+        self.assertEqual(client.retrieve.call_count, 1)
+        self.assertEqual([e["status"] for e in report.entries], ["failed"])
+
+    def test_pop_request_failures_removes_only_request_stage_failures(self):
+        report = dl.ReportCollector()
+        report.add(2024, "v", LAND, None, status="failed", stage="request", month=2)
+        report.add(2024, "v", LAND, None, status="failed", stage="default_download", month=3)
+        report.add(2024, "v", LAND, None, status="success", via="cdsapi", month=4)
+        self.assertEqual(report.pop_request_failures(), {(2024, 2, "v", None)})
+        self.assertEqual([e["month"] for e in report.entries], [3, 4])
+
+    def test_repo_configs_without_times_are_unchanged(self):
+        for path in sorted(ROOT.glob("*.yaml")):
+            if path.name == "environment.yml":
+                continue
+            with self.subTest(config=path.name):
+                config = dl.load_config_from_yaml(path)
+                if config["times"] is not None:  # local (git-ignored) 00 UTC configs
+                    continue
+                dataset = config["dataset"]
+                self.assertEqual(dl.default_folder_pattern(), "hour/{short_name}")
+                tasks = self.tasks(years=list(config["years"])[:1], variables=config["variables"],
+                                   dataset=dataset, pressure_levels=config["pressure_levels"],
+                                   short_names=config["short_names"],
+                                   path_pattern=dl.default_name_pattern(dataset))
+                months = [None] if dataset != LAND else list(range(1, 13))
+                self.assertEqual(sorted({t.month for t in tasks}, key=str), sorted(months, key=str))
+                client = Mock()
+                dl.submit_request(client, replace(tasks[0], skip_existing=False))
+                self.assertEqual(client.retrieve.call_args.args[1]["time"],
+                                 [f"{h:02d}:00" for h in range(24)])
+
+    def test_land_00utc_is_one_annual_request(self):
+        config = self.config(times="00:00")
+        self.assertEqual(config["times"], ("00:00",))
+        pattern = str(self.root / dl.default_folder_pattern()
+                      / dl.default_name_pattern(LAND, config["times"]))
+        tasks = self.tasks(years=[2023, 2024], times=config["times"], path_pattern=pattern)
+        self.assertEqual([(t.year, t.month) for t in tasks], [(2023, None), (2024, None)])
+        client = Mock()
+        outcome = dl.submit_request(client, tasks[1])
+        client.retrieve.assert_called_once_with(LAND, {
+            "variable": ["2m_temperature"], "year": "2024",
+            "month": [f"{m:02d}" for m in range(1, 13)],
+            "day": [f"{d:02d}" for d in range(1, 32)], "time": ["00:00"],
+            "data_format": "netcdf", "download_format": "unarchived",
+        })
+        self.assertEqual(Path(outcome.target).relative_to(self.root).as_posix(),
+                         "hour/t2m/era5-land.reanalysis.t2m.00utc.0p1deg.global.2024.nc")
+
+    def test_times_validation_and_monthly_split(self):
+        self.assertIsNone(self.config(times=[f"{h:02d}:00" for h in range(24)])["times"])
+        self.assertEqual(self.config(times=["12:00", "00:00"])["times"], ("00:00", "12:00"))
+        for bad in ([], ["0:00"], ["00:30"], ["00:00", "00:00"], [0]):
+            with self.subTest(times=bad), self.assertRaises(ValueError):
+                self.config(times=bad)
+        # Other subsets have no default name; 12+ hours fall back to monthly ERA5-Land requests
+        for dataset, times in ((LAND, ("00:00", "12:00")), (SINGLE, ("00:00",))):
+            with self.subTest(dataset=dataset), self.assertRaisesRegex(ValueError, "name_pattern"):
+                dl.default_name_pattern(dataset, times)
+        twelve = tuple(f"{h:02d}:00" for h in range(0, 24, 2))
+        self.assertEqual([t.month for t in self.tasks(times=twelve)], list(range(1, 13)))
+        with self.assertRaisesRegex(ValueError, "same output path"):
+            self.tasks(times=twelve, path_pattern=str(self.root / "{short_name}.{year}.nc"))
+
+    def test_unknown_config_key_warns(self):
+        with self.assertLogs(dl.logger, level="WARNING") as logs:
+            config = self.config(time=["00:00"])
+        self.assertIsNone(config["times"])
+        self.assertIn("'time'", "\n".join(logs.output))
+
+    def test_cli_rejects_times_without_name_pattern_before_credentials(self):
+        raw = dict(dataset=LAND, years=[2024], variables=["2m_temperature"],
+                   api_keys_file=str(self.root / "nonexistent-keys.json"),
+                   times=["00:00", "12:00"])
+        path = self.root / "cli.yaml"
+        path.write_text(yaml.safe_dump(raw))
+        result = subprocess.run([sys.executable, str(ROOT / "downloader_ERA5.py"),
+                                 "--file", str(path)], cwd=self.root,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("set name_pattern explicitly", result.stdout + result.stderr)
+        self.assertNotIn("API keys file", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
