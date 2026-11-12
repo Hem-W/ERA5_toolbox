@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 # Script version
-__version__ = "0.5.1"
+__version__ = "0.5.2.dev"
 
 logger = logging.getLogger("ERA5_toolbox.downloader_ERA5")
 
@@ -46,6 +46,10 @@ _REQUEST_RETRY_DELAYS = (300, 900)
 _RETRY_ROUNDS = 2
 _RETRY_ROUND_WAIT = 600
 
+
+####################
+# Data types
+####################
 
 @dataclass(frozen=True)
 class RequestTask:
@@ -153,170 +157,137 @@ class ReportCollector:
                 out.info(f"  [{e['stage']}] {self._task_label(e)} :: {short}")
         out.info("=" * 60)
 
-def validate_key(key, url):
+
+####################
+# Configuration
+####################
+
+_CONFIG_KEYS = {
+    'years', 'variables', 'dataset', 'pressure_levels', 'api_keys_file',
+    'concurrent_requests', 'download_workers', 'skip_existing', 'short_names',
+    'folder_pattern', 'name_pattern', 'times',
+}
+
+
+def parse_times(times_raw):
+    """Validate ``times`` (str or list of ``HH:00``) into a sorted tuple; None or all 24 hours -> None."""
+    if times_raw is None:
+        return None
+    if isinstance(times_raw, str):
+        times_raw = [times_raw]
+    if not isinstance(times_raw, list) or not times_raw:
+        raise ValueError("'times' must be a non-empty string or list of 'HH:00' strings")
+    for t in times_raw:
+        if not isinstance(t, str) or t not in _ALL_HOURS:
+            raise ValueError(f"'times' entry {t!r} is not a whole hour 'HH:00' (00:00 to 23:00)")
+    if len(set(times_raw)) != len(times_raw):
+        raise ValueError(f"'times' has duplicate entries: {times_raw}")
+    times = tuple(sorted(times_raw))
+    return None if len(times) == len(_ALL_HOURS) else times
+
+
+def load_config_from_yaml(yaml_path):
     """
-    Validate a CDS API key before starting the task loop.
-
-    cdsapi routes keys to one of two client implementations depending on format:
-    - Key WITH colon (UID:APIKEY) → cdsapi.Client, uses HTTP Basic Auth,
-      POST to {url}/resources/{dataset}
-    - Key WITHOUT colon (UUID token) → ecmwf.datastores.LegacyClient, uses
-      PRIVATE-TOKEN header, POST to {url}/retrieve/v1/processes/{dataset}/execution
-
-    Step 1 (local): cdsapi.Client.__init__ validates key format and auth setup.
-    Step 2 (network): calls the appropriate authenticated endpoint for each client type.
-
-    Returns:
-        (True, None) if the key is valid.
-        (False, error_message) if the key is invalid, with the original error message.
-    """
-    # Step 1: local format check — no network call
-    try:
-        client = cdsapi.Client(url=url, key=key, quiet=True)
-    except AssertionError as e:
-        return False, f"Malformed key format: {e}"
-    except Exception as e:
-        return False, f"Client init error: {e}"
-
-    # Step 2: network check, branching on client type.
-    try:
-        if hasattr(client, 'client') and hasattr(client.client, 'check_authentication'):
-            # LegacyClient (key without colon): uses PRIVATE-TOKEN header internally.
-            # check_authentication() calls POST {url}/profiles/v1/account/verification/pat
-            # and raises requests.HTTPError for invalid tokens.
-            client.client.check_authentication()
-        else:
-            # Old-style Client (key with colon): uses HTTP Basic Auth via session.auth.
-            # POST to /resources/ with an empty body — server validates credentials before
-            # the request body, so a bad key returns 401/403 and a good key returns 400/422.
-            resp = client.session.post(
-                f"{url}/resources/reanalysis-era5-single-levels",
-                json={},
-                verify=client.verify,
-                timeout=client.timeout,
-            )
-            if resp.status_code in (401, 403):
-                return False, f"HTTP {resp.status_code} {resp.reason}: {resp.text.strip()}"
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-
-def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
-    """
-    Download a file using urllib3 with retry and resume capabilities
+    Load download configuration from a YAML file.
 
     Args:
-        url: URL to download
-        target_path: Target file path
-        chunk_size: Size of chunks to download (1MB default)
+        yaml_path: Path to the YAML configuration file.
 
     Returns:
-        bool: True if download was successful, False otherwise
+        dict: Validated configuration with keys:
+            years, variables, dataset, pressure_levels, api_keys_file,
+            concurrent_requests, download_workers, skip_existing, short_names,
+            folder_pattern, name_pattern, times.
+
+    Raises:
+        FileNotFoundError: If the YAML file does not exist.
+        ValueError: If required fields are missing or have invalid types.
     """
-    try:
-        # Configure retry strategy
-        retry = urllib3.Retry(
-            total=10,                  # Maximum number of retries
-            backoff_factor=0.5,        # Backoff factor for retries
-            status_forcelist=[500, 502, 503, 504],  # Retry on these HTTP status codes
-            allowed_methods=["HEAD", "GET"]        # Only retry for these methods
-        )
+    yaml_path = pathlib.Path(yaml_path)
+    if not yaml_path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {yaml_path}")
 
-        # Create connection pool with retry strategy
-        http = urllib3.PoolManager(
-            retries=retry,
-            timeout=urllib3.Timeout(connect=30.0, read=1800.0),  # 30s connect, 30min read
-            maxsize=10                 # Connection pool size
-        )
+    with open(yaml_path, 'r') as f:
+        raw = yaml.safe_load(f)
 
-        # Check for partial download to resume
-        headers = {}
-        file_size = 0
-        mode = 'wb'
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected a YAML mapping at the top level, got {type(raw).__name__}")
 
-        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
-            file_size = os.path.getsize(target_path)
-            headers['Range'] = f'bytes={file_size}-'
-            mode = 'ab'
-            logger.info(f"urllib3: Resuming download from byte {file_size}")
+    # Unknown keys are ignored, so warn: a typo such as `time:` would silently request all 24 hours
+    unknown = sorted(set(raw) - _CONFIG_KEYS)
+    if unknown:
+        logger.warning(f"Ignoring unknown configuration key(s) in {yaml_path}: {unknown}; "
+                       f"known keys: {sorted(_CONFIG_KEYS)}")
 
-        # Get content length with a HEAD request
-        head_response = http.request('HEAD', url, headers=headers)
-        total_size = int(head_response.headers.get('content-length', 0))
+    # --- years (required) ---
+    if 'years' not in raw:
+        raise ValueError("'years' is required in the YAML configuration")
+    years_raw = raw['years']
+    if isinstance(years_raw, dict):
+        if 'start' not in years_raw or 'stop' not in years_raw:
+            raise ValueError("'years' mapping must contain 'start' and 'stop' keys")
+        start = int(years_raw['start'])
+        stop = int(years_raw['stop'])
+        if start > stop:
+            raise ValueError(f"'years.start' ({start}) must be <= 'years.stop' ({stop})")
+        years = range(start, stop + 1)  # inclusive on both ends
+    elif isinstance(years_raw, list):
+        years = [int(y) for y in years_raw]
+    else:
+        raise ValueError(f"'years' must be a list or a mapping with start/stop, got {type(years_raw).__name__}")
 
-        if 'Range' in headers and head_response.status == 206:  # Partial content
-            # For resumed download, add the existing file size to get total
-            if 'content-range' in head_response.headers:
-                content_range = head_response.headers.get('content-range', '')
-                if content_range and '/' in content_range:
-                    total_size = int(content_range.split('/')[-1])
+    # --- variables (required) ---
+    if 'variables' not in raw:
+        raise ValueError("'variables' is required in the YAML configuration")
+    variables = raw['variables']
+    if isinstance(variables, str):
+        variables = [variables]
+    if not isinstance(variables, list) or not all(isinstance(v, str) for v in variables):
+        raise ValueError("'variables' must be a string or list of strings")
 
-        # Start download
-        response = http.request(
-            'GET',
-            url,
-            headers=headers,
-            preload_content=False  # Stream the response
-        )
+    # --- optional fields with defaults ---
+    dataset = raw.get('dataset', 'reanalysis-era5-single-levels')
+    pressure_levels = raw.get('pressure_levels', None)
+    if isinstance(pressure_levels, (int, str)):
+        pressure_levels = [pressure_levels]
+    elif pressure_levels is not None and not isinstance(pressure_levels, list):
+        raise ValueError("'pressure_levels' must be an int, str, or list of int/str")
+    api_keys_file = raw.get('api_keys_file', None)
+    concurrent_requests = int(raw.get('concurrent_requests', 3))
+    download_workers = int(raw.get('download_workers', 1))
+    skip_existing = bool(raw.get('skip_existing', True))
+    short_names = raw.get('short_names', None)
 
-        # Initialize byte counter for progress tracking
-        downloaded_bytes = file_size
-        with tqdm(total=total_size, initial=file_size, unit='B', unit_scale=True,
-                  desc=f"Downloading {os.path.basename(target_path)}") as pbar:
+    if short_names is not None and not isinstance(short_names, dict):
+        raise ValueError("'short_names' must be a mapping of variable name to short name")
 
-            with open(target_path, mode) as f:
-                for chunk in response.stream(chunk_size):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_bytes += len(chunk)
-                        pbar.update(len(chunk))
+    folder_pattern = raw.get('folder_pattern', None)
+    name_pattern = raw.get('name_pattern', None)
+    if folder_pattern is not None and not isinstance(folder_pattern, str):
+        raise ValueError("'folder_pattern' must be a string")
+    if name_pattern is not None and not isinstance(name_pattern, str):
+        raise ValueError("'name_pattern' must be a string")
+    times = parse_times(raw.get('times', None))
 
-        response.release_conn()
+    return {
+        'years': years,
+        'variables': variables,
+        'dataset': dataset,
+        'pressure_levels': pressure_levels,
+        'api_keys_file': api_keys_file,
+        'concurrent_requests': concurrent_requests,
+        'download_workers': download_workers,
+        'skip_existing': skip_existing,
+        'short_names': short_names,
+        'folder_pattern': folder_pattern,
+        'name_pattern': name_pattern,
+        'times': times,
+    }
 
-        # Verify if download is complete
-        if total_size > 0 and downloaded_bytes < total_size:
-            logger.warning(f"urllib3: Download incomplete for {target_path}: got {downloaded_bytes} bytes out of {total_size}")
-            return False
 
-        logger.info(f"urllib3: Successfully downloaded {target_path}")
-        return True
-
-    except Exception as e:
-        logger.error(f"urllib3: Error downloading {target_path}: {str(e)}")
-        return False
-
-def get_variable_code_from_netcdf(nc_file, api_variable):
-    """
-    Extract the actual variable code from a NetCDF file using xarray.
-    Args:
-        nc_file: Path to the NetCDF file
-        api_variable: The variable name used in the API request
-    Returns:
-        str: The variable code as stored in the NetCDF file
-    """
-    # Common auxiliary variables to exclude
-    excluded = {'number', 'expver'}
-    try:
-        with xr.open_dataset(nc_file) as ds:
-            candidates = [v for v in ds.data_vars if v not in excluded]
-
-        # Return the appropriate variable
-        if api_variable in candidates:
-            return api_variable
-        if len(candidates) == 1:
-            return candidates[0]
-        if len(candidates) > 1:
-            logger.info(f"Multiple variables found in NetCDF file: {candidates}")
-            logger.info(f"Using first variable: {candidates[0]}")
-            return candidates[0]
-        logger.warning("No clear variable found, falling back to original name")
-        return api_variable
-
-    except Exception as e:
-        logger.error(f"Error reading NetCDF file: {e}")
-        return api_variable
-
+####################
+# Output paths and tasks
+####################
 
 def default_folder_pattern():
     """Default folder pattern: one ``hour/{short_name}`` subdir per variable."""
@@ -396,7 +367,9 @@ def build_request_tasks(*, years, variables, dataset, path_pattern,
                         skip_existing=True, times=None):
     """Build one task per output file in chronological order, checking for path collisions."""
     if dataset == "reanalysis-era5-pressure-levels":
-        levels = pressure_levels or [None]
+        if not pressure_levels:
+            raise ValueError(f"pressure_levels is required for dataset {dataset}")
+        levels = pressure_levels
     else:
         if pressure_levels:
             logger.warning(f"pressure_levels {pressure_levels} ignored for dataset {dataset}")
@@ -424,6 +397,150 @@ def build_request_tasks(*, years, variables, dataset, path_pattern,
         ))
     return tasks
 
+
+####################
+# API keys
+####################
+
+def load_api_keys(keys_file='cdsapi_keys.json'):
+    """Load API keys from a JSON file using JSON5 parser (supports comments)
+
+    The JSON file should have a format like:
+    ```
+    {
+        // API keys for CDS
+        "keys": [
+            "your-api-key-1",  // Optional comment
+            "your-api-key-2",  // Optional comment
+        ]
+    }
+    ```
+
+    Args:
+        keys_file (str): Path to the JSON file containing API keys
+
+    Returns:
+        list: List of API keys
+
+    Raises:
+        RuntimeError: If no valid keys could be loaded
+    """
+    keys_file = keys_file or "cdsapi_keys.json"
+
+    if not os.path.exists(keys_file):
+        logger.error(f"API keys file {keys_file} not found.")
+        raise RuntimeError(f"API keys file {keys_file} not found. Please create this file with your API keys.")
+
+    try:
+        with open(keys_file, 'r') as f:
+            data = json5.load(f)
+    except Exception as e:
+        logger.error(f"Error reading {keys_file}: {str(e)}")
+        raise RuntimeError(f"Error reading {keys_file}. Please ensure it is readable and contains valid JSON. Underlying error: {str(e)}") from e
+
+    if not isinstance(data, dict) or 'keys' not in data or not isinstance(data['keys'], list):
+        logger.error(f"Invalid format in {keys_file}. Expected 'keys' list.")
+        raise RuntimeError(f"Invalid format in {keys_file}. Expected a JSON object with a 'keys' list.")
+
+    keys = data['keys']
+    if not keys:
+        logger.error(f"No keys found in {keys_file}")
+        raise RuntimeError(f"No keys found in {keys_file}. Please add at least one API key.")
+
+    logger.info(f"Successfully loaded {len(keys)} API keys from {keys_file}")
+    return keys
+
+
+def validate_key(key, url):
+    """
+    Validate a CDS API key before starting the task loop.
+
+    cdsapi routes keys to one of two client implementations depending on format:
+    - Key WITH colon (UID:APIKEY) → cdsapi.Client, uses HTTP Basic Auth,
+      POST to {url}/resources/{dataset}
+    - Key WITHOUT colon (UUID token) → ecmwf.datastores.LegacyClient, uses
+      PRIVATE-TOKEN header, POST to {url}/retrieve/v1/processes/{dataset}/execution
+
+    Step 1 (local): cdsapi.Client.__init__ validates key format and auth setup.
+    Step 2 (network): calls the appropriate authenticated endpoint for each client type.
+
+    Returns:
+        (True, None) if the key is valid.
+        (False, error_message) if the key is invalid, with the original error message.
+    """
+    # Step 1: local format check — no network call
+    try:
+        client = cdsapi.Client(url=url, key=key, quiet=True)
+    except AssertionError as e:
+        return False, f"Malformed key format: {e}"
+    except Exception as e:
+        return False, f"Client init error: {e}"
+
+    # Step 2: network check, branching on client type.
+    try:
+        if hasattr(client, 'client') and hasattr(client.client, 'check_authentication'):
+            # LegacyClient (key without colon): uses PRIVATE-TOKEN header internally.
+            # check_authentication() calls POST {url}/profiles/v1/account/verification/pat
+            # and raises requests.HTTPError for invalid tokens.
+            client.client.check_authentication()
+        else:
+            # Old-style Client (key with colon): uses HTTP Basic Auth via session.auth.
+            # POST to /resources/ with an empty body — server validates credentials before
+            # the request body, so a bad key returns 401/403 and a good key returns 400/422.
+            resp = client.session.post(
+                f"{url}/resources/reanalysis-era5-single-levels",
+                json={},
+                verify=client.verify,
+                timeout=client.timeout,
+            )
+            if resp.status_code in (401, 403):
+                return False, f"HTTP {resp.status_code} {resp.reason}: {resp.text.strip()}"
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def filter_valid_keys(keys, url="https://cds.climate.copernicus.eu/api"):
+    """
+    Validate each key and return only those that pass the pre-flight check.
+
+    Logs an error for every invalid key (with the original server message) and
+    raises RuntimeError if no valid keys remain.
+
+    Args:
+        keys: List of CDS API key strings.
+        url: CDS API base URL.
+
+    Returns:
+        list: Keys that passed validation.
+
+    Raises:
+        RuntimeError: If all keys are invalid.
+    """
+    logger.info(f"Validating {len(keys)} API key(s)...")
+    valid = []
+    for key in keys:
+        ok, err = validate_key(key, url)
+        if ok:
+            valid.append(key)
+            logger.info(f"Key {key[:4]}...: valid")
+        else:
+            logger.error(f"Key {key[:4]}...: invalid — {err}")
+
+    if not valid:
+        raise RuntimeError("No valid API keys found. Please check your keys and licence agreements.")
+
+    if len(valid) < len(keys):
+        logger.warning(
+            f"{len(keys) - len(valid)} key(s) removed; "
+            f"proceeding with {len(valid)} valid key(s)"
+        )
+    return valid
+
+
+####################
+# Request stage: CDS prepares the file
+####################
 
 def submit_request(client, request_task, worker_id=None, report=None):
     """
@@ -461,8 +578,6 @@ def submit_request(client, request_task, worker_id=None, report=None):
             request['month'] = f'{rt.month:02d}'
 
     if rt.dataset == "reanalysis-era5-pressure-levels":
-        if rt.pressure_level is None:
-            raise ValueError("pressure_level is required for reanalysis-era5-pressure-levels dataset")
         request["pressure_level"] = [rt.pressure_level]
 
     target = build_target_path(
@@ -504,6 +619,116 @@ def submit_request(client, request_task, worker_id=None, report=None):
             time.sleep(delay)
 
 
+####################
+# Download stage
+####################
+
+def download_file_with_urllib3(url, target_path, chunk_size=1024*1024):
+    """
+    Download a file using urllib3 with retry and resume capabilities
+
+    Args:
+        url: URL to download
+        target_path: Target file path
+        chunk_size: Size of chunks to download (1MB default)
+
+    Returns:
+        bool: True if download was successful, False otherwise
+    """
+    try:
+        # Configure retry strategy
+        retry = urllib3.Retry(
+            total=10,                  # Maximum number of retries
+            backoff_factor=0.5,        # Backoff factor for retries
+            status_forcelist=[500, 502, 503, 504],  # Retry on these HTTP status codes
+            allowed_methods=["GET"]    # Only retry for these methods
+        )
+
+        # Create connection pool with retry strategy
+        http = urllib3.PoolManager(
+            retries=retry,
+            timeout=urllib3.Timeout(connect=30.0, read=1800.0),  # 30s connect, 30min read
+            maxsize=10                 # Connection pool size
+        )
+
+        # Resume a partial download if one exists
+        file_size = os.path.getsize(target_path) if os.path.exists(target_path) else 0
+        headers = {'Range': f'bytes={file_size}-'} if file_size else {}
+        if file_size:
+            logger.info(f"urllib3: Resuming download from byte {file_size}")
+
+        response = http.request('GET', url, headers=headers, preload_content=False)
+
+        # urllib3 does not raise on 4xx, so an error page would otherwise be saved as the file
+        if response.status == 200:  # whole file: nothing to resume, or the server ignored Range
+            file_size, mode = 0, 'wb'
+            total_size = int(response.headers.get('content-length', 0))
+        elif response.status == 206 and file_size:  # rest of the file, "content-range: bytes a-b/total"
+            mode = 'ab'
+            total = response.headers.get('content-range', '').rpartition('/')[2]
+            total_size = int(total) if total.isdigit() else 0
+        else:
+            logger.warning(f"urllib3: HTTP {response.status} for {target_path}")
+            response.release_conn()
+            return False
+
+        # Initialize byte counter for progress tracking
+        downloaded_bytes = file_size
+        with tqdm(total=total_size, initial=file_size, unit='B', unit_scale=True,
+                  desc=f"Downloading {os.path.basename(target_path)}") as pbar:
+
+            with open(target_path, mode) as f:
+                for chunk in response.stream(chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded_bytes += len(chunk)
+                        pbar.update(len(chunk))
+
+        response.release_conn()
+
+        # Verify if download is complete
+        if total_size and downloaded_bytes != total_size:
+            logger.warning(f"urllib3: Download incomplete for {target_path}: got {downloaded_bytes} bytes out of {total_size}")
+            return False
+
+        logger.info(f"urllib3: Successfully downloaded {target_path}")
+        return True
+
+    except Exception as e:
+        logger.error(f"urllib3: Error downloading {target_path}: {str(e)}")
+        return False
+
+
+def get_variable_code_from_netcdf(nc_file, api_variable):
+    """
+    Extract the actual variable code from a NetCDF file using xarray.
+    Args:
+        nc_file: Path to the NetCDF file
+        api_variable: The variable name used in the API request
+    Returns:
+        str: The variable code as stored in the NetCDF file
+    """
+    # Common auxiliary variables to exclude
+    excluded = {'number', 'expver'}
+    try:
+        with xr.open_dataset(nc_file) as ds:
+            candidates = [v for v in ds.data_vars if v not in excluded]
+
+        # Return the appropriate variable
+        if api_variable in candidates:
+            return api_variable
+        if len(candidates) > 1:
+            logger.info(f"Multiple variables found in NetCDF file: {candidates}, using the first")
+        if candidates:
+            return candidates[0]
+        logger.warning("No clear variable found, falling back to original name")
+        return api_variable
+
+    except Exception as e:
+        logger.error(f"Error reading NetCDF file: {e}")
+        return api_variable
+
+
 def perform_download(download_task, worker_id=None, report=None):
     """
     Download a prepared CDS result to disk.
@@ -524,20 +749,22 @@ def perform_download(download_task, worker_id=None, report=None):
     rt = download_task.request
     result = download_task.result
     target = download_task.target
-
-    # Ensure the output directory exists before the downloader writes into it.
-    target_dir = os.path.dirname(target)
-    if target_dir:
-        os.makedirs(target_dir, exist_ok=True)
+    # Download to .part first: a killed run must not leave a half file that skip_existing treats as done
+    part = target + ".part"
 
     # Tracks which stage/path we ended up on, for the summary report.
     download_via = None        # 'cdsapi' | 'urllib3' on success
     failure_stage = None       # 'default_download' | 'fallback_download' on failure
 
     try:
+        # Ensure the output directory exists before the downloader writes into it.
+        target_dir = os.path.dirname(target)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+
         try:
             # Download method 1: cdsapi built-in
-            result.download(target)
+            result.download(part)
             logger.info(f"{log_prefix}Successfully downloaded {target} via cdsapi")
             download_via = 'cdsapi'
         except Exception as e:
@@ -556,7 +783,7 @@ def perform_download(download_task, worker_id=None, report=None):
                     if attempt > 1:
                         logger.info(f"{log_prefix}Retry attempt {attempt}/3 for {target} using urllib3")
 
-                    if download_file_with_urllib3(download_url, target):
+                    if download_file_with_urllib3(download_url, part):
                         logger.info(f"{log_prefix}Successfully downloaded {target} using urllib3")
                         download_via = 'urllib3'
                         break
@@ -572,6 +799,8 @@ def perform_download(download_task, worker_id=None, report=None):
             else:
                 failure_stage = 'default_download'
                 raise
+
+        os.replace(part, target)
 
         # Rename the file when short_name was not provided (auto-detect from NetCDF)
         if rt.short_name is None and os.path.exists(target):
@@ -602,9 +831,9 @@ def perform_download(download_task, worker_id=None, report=None):
     except Exception as e:
         logger.error(f"{log_prefix}Download failed for {target}: {str(e)}")
         logger.error(traceback.format_exc())
-        if os.path.exists(target):
-            logger.info(f"{log_prefix}Removing broken file {target}")
-            os.remove(target)
+        if os.path.exists(part):
+            logger.info(f"{log_prefix}Removing broken file {part}")
+            os.remove(part)
         if report is not None:
             report.add(rt.year, rt.variable, rt.dataset, rt.pressure_level,
                        status='failed',
@@ -612,6 +841,10 @@ def perform_download(download_task, worker_id=None, report=None):
                        error=str(e), month=rt.month)
         return False
 
+
+####################
+# Worker threads
+####################
 
 def key_request_thread(key, task_queue, results_queue, worker_id, report=None):
     """
@@ -717,214 +950,6 @@ def start_key_workers(key, shared_task_queue, download_workers=1, concurrent_req
 
     return threads
 
-def filter_valid_keys(keys, url="https://cds.climate.copernicus.eu/api"):
-    """
-    Validate each key and return only those that pass the pre-flight check.
-
-    Logs an error for every invalid key (with the original server message) and
-    raises RuntimeError if no valid keys remain.
-
-    Args:
-        keys: List of CDS API key strings.
-        url: CDS API base URL.
-
-    Returns:
-        list: Keys that passed validation.
-
-    Raises:
-        RuntimeError: If all keys are invalid.
-    """
-    logger.info(f"Validating {len(keys)} API key(s)...")
-    valid = []
-    for key in keys:
-        ok, err = validate_key(key, url)
-        if ok:
-            valid.append(key)
-            logger.info(f"Key {key[:4]}...: valid")
-        else:
-            logger.error(f"Key {key[:4]}...: invalid — {err}")
-
-    if not valid:
-        raise RuntimeError("No valid API keys found. Please check your keys and licence agreements.")
-
-    if len(valid) < len(keys):
-        logger.warning(
-            f"{len(keys) - len(valid)} key(s) removed; "
-            f"proceeding with {len(valid)} valid key(s)"
-        )
-    return valid
-
-
-def load_api_keys(keys_file='cdsapi_keys.json'):
-    """Load API keys from a JSON file using JSON5 parser (supports comments)
-
-    The JSON file should have a format like:
-    ```
-    {
-        // API keys for CDS
-        "keys": [
-            "your-api-key-1",  // Optional comment
-            "your-api-key-2",  // Optional comment
-        ]
-    }
-    ```
-
-    Args:
-        keys_file (str): Path to the JSON file containing API keys
-
-    Returns:
-        list: List of API keys
-
-    Raises:
-        RuntimeError: If no valid keys could be loaded
-    """
-    keys_file = keys_file or "cdsapi_keys.json"
-
-    if not os.path.exists(keys_file):
-        logger.error(f"API keys file {keys_file} not found.")
-        raise RuntimeError(f"API keys file {keys_file} not found. Please create this file with your API keys.")
-
-    try:
-        with open(keys_file, 'r') as f:
-            data = json5.load(f)
-    except Exception as e:
-        logger.error(f"Error reading {keys_file}: {str(e)}")
-        raise RuntimeError(f"Error reading {keys_file}. Please ensure it is readable and contains valid JSON. Underlying error: {str(e)}") from e
-
-    if not isinstance(data, dict) or 'keys' not in data or not isinstance(data['keys'], list):
-        logger.error(f"Invalid format in {keys_file}. Expected 'keys' list.")
-        raise RuntimeError(f"Invalid format in {keys_file}. Expected a JSON object with a 'keys' list.")
-
-    keys = data['keys']
-    if not keys:
-        logger.error(f"No keys found in {keys_file}")
-        raise RuntimeError(f"No keys found in {keys_file}. Please add at least one API key.")
-
-    logger.info(f"Successfully loaded {len(keys)} API keys from {keys_file}")
-    return keys
-
-_CONFIG_KEYS = {
-    'years', 'variables', 'dataset', 'pressure_levels', 'api_keys_file',
-    'concurrent_requests', 'download_workers', 'skip_existing', 'short_names',
-    'folder_pattern', 'name_pattern', 'times',
-}
-
-
-def parse_times(times_raw):
-    """Validate ``times`` (str or list of ``HH:00``) into a sorted tuple; None or all 24 hours -> None."""
-    if times_raw is None:
-        return None
-    if isinstance(times_raw, str):
-        times_raw = [times_raw]
-    if not isinstance(times_raw, list) or not times_raw:
-        raise ValueError("'times' must be a non-empty string or list of 'HH:00' strings")
-    for t in times_raw:
-        if not isinstance(t, str) or t not in _ALL_HOURS:
-            raise ValueError(f"'times' entry {t!r} is not a whole hour 'HH:00' (00:00 to 23:00)")
-    if len(set(times_raw)) != len(times_raw):
-        raise ValueError(f"'times' has duplicate entries: {times_raw}")
-    times = tuple(sorted(times_raw))
-    return None if len(times) == len(_ALL_HOURS) else times
-
-
-def load_config_from_yaml(yaml_path):
-    """
-    Load download configuration from a YAML file.
-
-    Args:
-        yaml_path: Path to the YAML configuration file.
-
-    Returns:
-        dict: Validated configuration with keys:
-            years, variables, dataset, pressure_levels, api_keys_file,
-            concurrent_requests, download_workers, skip_existing, short_names,
-            folder_pattern, name_pattern, times.
-
-    Raises:
-        FileNotFoundError: If the YAML file does not exist.
-        ValueError: If required fields are missing or have invalid types.
-    """
-    yaml_path = pathlib.Path(yaml_path)
-    if not yaml_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {yaml_path}")
-
-    with open(yaml_path, 'r') as f:
-        raw = yaml.safe_load(f)
-
-    if not isinstance(raw, dict):
-        raise ValueError(f"Expected a YAML mapping at the top level, got {type(raw).__name__}")
-
-    # Unknown keys are ignored, so warn: a typo such as `time:` would silently request all 24 hours
-    unknown = sorted(set(raw) - _CONFIG_KEYS)
-    if unknown:
-        logger.warning(f"Ignoring unknown configuration key(s) in {yaml_path}: {unknown}; "
-                       f"known keys: {sorted(_CONFIG_KEYS)}")
-
-    # --- years (required) ---
-    if 'years' not in raw:
-        raise ValueError("'years' is required in the YAML configuration")
-    years_raw = raw['years']
-    if isinstance(years_raw, dict):
-        if 'start' not in years_raw or 'stop' not in years_raw:
-            raise ValueError("'years' mapping must contain 'start' and 'stop' keys")
-        start = int(years_raw['start'])
-        stop = int(years_raw['stop'])
-        if start > stop:
-            raise ValueError(f"'years.start' ({start}) must be <= 'years.stop' ({stop})")
-        years = range(start, stop + 1)  # inclusive on both ends
-    elif isinstance(years_raw, list):
-        years = [int(y) for y in years_raw]
-    else:
-        raise ValueError(f"'years' must be a list or a mapping with start/stop, got {type(years_raw).__name__}")
-
-    # --- variables (required) ---
-    if 'variables' not in raw:
-        raise ValueError("'variables' is required in the YAML configuration")
-    variables = raw['variables']
-    if isinstance(variables, str):
-        variables = [variables]
-    if not isinstance(variables, list) or not all(isinstance(v, str) for v in variables):
-        raise ValueError("'variables' must be a string or list of strings")
-
-    # --- optional fields with defaults ---
-    dataset = raw.get('dataset', 'reanalysis-era5-single-levels')
-    pressure_levels = raw.get('pressure_levels', None)
-    if isinstance(pressure_levels, (int, str)):
-        pressure_levels = [pressure_levels]
-    elif pressure_levels is not None and not isinstance(pressure_levels, list):
-        raise ValueError("'pressure_levels' must be an int, str, or list of int/str")
-    api_keys_file = raw.get('api_keys_file', None)
-    concurrent_requests = int(raw.get('concurrent_requests', 4))
-    download_workers = int(raw.get('download_workers', 1))
-    skip_existing = bool(raw.get('skip_existing', True))
-    short_names = raw.get('short_names', None)
-
-    if short_names is not None and not isinstance(short_names, dict):
-        raise ValueError("'short_names' must be a mapping of variable name to short name")
-
-    folder_pattern = raw.get('folder_pattern', None)
-    name_pattern = raw.get('name_pattern', None)
-    if folder_pattern is not None and not isinstance(folder_pattern, str):
-        raise ValueError("'folder_pattern' must be a string")
-    if name_pattern is not None and not isinstance(name_pattern, str):
-        raise ValueError("'name_pattern' must be a string")
-    times = parse_times(raw.get('times', None))
-
-    return {
-        'years': years,
-        'variables': variables,
-        'dataset': dataset,
-        'pressure_levels': pressure_levels,
-        'api_keys_file': api_keys_file,
-        'concurrent_requests': concurrent_requests,
-        'download_workers': download_workers,
-        'skip_existing': skip_existing,
-        'short_names': short_names,
-        'folder_pattern': folder_pattern,
-        'name_pattern': name_pattern,
-        'times': times,
-    }
-
 
 if __name__ == '__main__':
     ####################
@@ -967,7 +992,7 @@ if __name__ == '__main__':
         # Hardcoded Defaults (fallback when no --file is provided)
         ####################
         config_source = "hardcoded defaults"
-        years = range(2018, 2020)
+        years = range(2018, 2021)  # 2018-2020, as in template_request.yaml
         variables = ['surface_pressure']
         dataset = "reanalysis-era5-single-levels"
         pressure_levels = None  # List of pressure levels (hPa)
@@ -976,7 +1001,7 @@ if __name__ == '__main__':
         # Each thread submits one retrieve() at a time with its own fresh cdsapi.Client,
         # so N threads keep N requests queued on the CDS server simultaneously.
         # Note: CDS typically runs 1 request at a time per key but allows several queued.
-        concurrent_requests = 4
+        concurrent_requests = 3
         # Number of parallel download threads per key.
         download_workers = 1
         skip_existing = True  # Whether to skip downloading existing files (requires short_names if True)

@@ -88,7 +88,7 @@ variables = ["10m_u_component_of_wind", "2m_temperature"]
 dataset = "reanalysis-era5-single-levels"
 pressure_levels = None  # List of pressure levels (hPa)
 api_keys_file = None  # Use default 'cdsapi_keys.json'
-concurrent_requests = 4  # Number of concurrent request threads per key
+concurrent_requests = 3  # Number of concurrent request threads per key
 download_workers = 1  # Number of parallel download threads per key
 skip_existing = True  # Whether to skip downloading existing files
 

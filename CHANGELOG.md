@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.2.dev]
+### Changed
+- Default `concurrent_requests` is now 3 when omitted from the YAML (and in the hardcoded defaults), matching `template_request.yaml`
+- `downloader_ERA5.py` is reordered as: data types, configuration, output paths and tasks, API keys, request stage, download stage, worker threads
+
+### Fixed
+- Downloads are written to `<target>.part` and renamed only when complete, so a killed run no longer leaves a half file that `skip_existing` skips forever
+- urllib3 fallback: HTTP error replies (e.g. 404 for an expired result) were saved as the `.nc` file and reported as success
+
 ## [0.5.1]
 ### Added
 - `times` option (YAML): request only some hours of the day, e.g. `['00:00']` for ERA5-Land accumulated variables, whose 00 UTC value of day D+1 is the total of day D (~1/24 of the hourly download). ERA5-Land with 1-11 hours is requested once per year; default files are `hour/{short_name}/era5-land.reanalysis.{short_name}.00utc.0p1deg.global.{year}.nc`; other `times` require an explicit `name_pattern`

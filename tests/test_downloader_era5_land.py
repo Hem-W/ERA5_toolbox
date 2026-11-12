@@ -1,4 +1,5 @@
 """Offline request, file-handling, and annual ERA5 regression tests."""
+import http.server
 import queue
 import shutil
 import subprocess
@@ -395,6 +396,62 @@ class LandDownloaderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("set name_pattern explicitly", result.stdout + result.stderr)
         self.assertNotIn("API keys file", result.stdout + result.stderr)
+
+    def test_download_goes_through_part_file(self):
+        task = self.tasks()[0]
+        target = self.target(task)
+        result = self.local_result()
+        self.assertTrue(dl.perform_download(dl.DownloadTask(result, str(target), task)))
+        result.download.assert_called_once_with(str(target) + ".part")
+        self.assertTrue(target.exists())
+        self.assertFalse(Path(str(target) + ".part").exists())
+
+    def test_urllib3_fallback_checks_http_status(self):
+        body = b"0123456789"
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/missing":
+                    status, data = 404, b"<Error>NoSuchKey</Error>"
+                elif self.path == "/ranged" and self.headers.get("Range"):
+                    start = int(self.headers["Range"].split("=")[1].rstrip("-"))
+                    status, data = 206, body[start:]
+                else:  # /ignores-range: always the whole file
+                    status, data = 200, body
+                self.send_response(status)
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{len(body) - 1}/{len(body)}")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}"
+        for path, ok in (("/missing", False), ("/ignores-range", True), ("/ranged", True)):
+            with self.subTest(path=path):
+                part = self.root / f"{path[1:]}.nc.part"
+                part.write_bytes(body[:4])  # a partial download to resume
+                with self.assertLogs(dl.logger):
+                    self.assertEqual(dl.download_file_with_urllib3(url + path, str(part)), ok)
+                self.assertEqual(part.read_bytes(), body if ok else body[:4])
+
+    def test_worker_errors_are_reported(self):
+        with self.assertRaisesRegex(ValueError, "pressure_levels is required"):
+            self.tasks(dataset=PRESSURE)
+        blocker = self.root / "not-a-folder"
+        blocker.write_text("")
+        report = dl.ReportCollector()
+        with self.assertLogs(dl.logger, level="ERROR"):
+            self.assertFalse(dl.perform_download(
+                dl.DownloadTask(self.local_result(), str(blocker / "x.nc"), self.tasks()[0]),
+                report=report))
+        self.assertEqual([e["status"] for e in report.entries], ["failed"])
 
 
 if __name__ == "__main__":
